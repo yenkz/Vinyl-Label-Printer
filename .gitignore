@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+vinyl_labels.db
+bpm_pendientes.csv
+labels_output/
+.venv/
+.claude/

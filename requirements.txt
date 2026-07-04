@@ -1,0 +1,9 @@
+python3-discogs-client
+python-dotenv
+requests
+Pillow
+brother-ql-inventree
+pyusb
+yt-dlp
+librosa
+imageio-ffmpeg
