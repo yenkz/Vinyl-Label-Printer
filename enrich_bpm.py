@@ -1,20 +1,20 @@
 """
-enrich_bpm.py — PASO 6 (opcional, la última red)
+enrich_bpm.py — STEP 6 (optional, last resort)
 
-Para cada track que sigue sin BPM (porque Beatport no lo tuvo y la
-medición de audio tampoco pudo), lo busca automáticamente:
+For each track that still has no BPM (because Beatport didn't have it and
+audio measurement couldn't either), searches for it automatically:
 
-  1. Primero en Deezer, que es gratis y no pide ninguna clave.
-  2. Si no aparece y configuraste GETSONGBPM_API_KEY en config.py,
-     prueba también en getsongbpm.com.
+  1. First on Deezer, which is free and requires no API key.
+  2. If not found and GETSONGBPM_API_KEY is configured in config.py,
+     also tries getsongbpm.com.
 
-Esto es "mejor esfuerzo": vinilos raros, ediciones de nicho, remixes
-o tracks instrumentales sin nombre suelen no aparecer. Lo que se
-encuentre queda anotado como fuente en bpm_sources y SIN validar:
-la ✓ la ponés vos en el editor (edit_bpm.py), que muestra todas las
-fuentes lado a lado. Lo que no aparezca se carga a mano ahí mismo.
+This is "best effort": rare vinyl, niche editions, remixes, or unnamed
+instrumental tracks often don't appear. What is found is noted as a source
+in bpm_sources but NOT validated: you put the checkmark in the editor
+(edit_bpm.py), which shows all sources side by side. What isn't found
+you enter manually there.
 
-Cómo correrlo:
+How to run it:
     python enrich_bpm.py
 """
 
@@ -30,44 +30,43 @@ DEEZER_API = "https://api.deezer.com"
 GETSONGBPM_API = "https://api.getsong.co"
 
 
-def buscar_bpm_deezer(titulo, artista):
+def search_bpm_deezer(title, artist):
     """
-    Busca un track en Deezer por título + artista y devuelve su BPM
-    (float) o None. Deezer no pide API key, pero el BPM solo viene
-    en el detalle del track, así que son dos pedidos: buscar y pedir
-    el detalle del primer resultado.
+    Searches for a track on Deezer by title + artist and returns its BPM
+    (float) or None. Deezer requires no API key, but BPM only comes in the
+    track details, so it takes two requests: search then get the first
+    result's details.
 
-    La búsqueda "estricta" de Deezer se saltea varios tracks que la
-    búsqueda simple sí encuentra, así que probamos las dos. En la
-    simple chequeamos que el artista coincida, para no traer el BPM
-    de otra canción con el mismo nombre.
+    Deezer's "strict" search skips several tracks that simple search finds,
+    so we try both. In simple search we check that the artist matches,
+    to not get the BPM of another song with the same name.
     """
     try:
         track_id = None
-        # 1) Búsqueda estricta por artista + título exactos.
+        # 1) Strict search by exact artist + title.
         resp = requests.get(
             f"{DEEZER_API}/search",
-            params={"q": f'artist:"{artista}" track:"{titulo}"', "limit": 1},
+            params={"q": f'artist:"{artist}" track:"{title}"', "limit": 1},
             timeout=10,
         )
         if resp.status_code == 200:
-            resultados = resp.json().get("data") or []
-            if resultados:
-                track_id = resultados[0]["id"]
+            results = resp.json().get("data") or []
+            if results:
+                track_id = results[0]["id"]
 
-        # 2) Si no hubo suerte, búsqueda simple, verificando el artista.
+        # 2) If that didn't work, simple search, verifying the artist.
         if track_id is None:
-            time.sleep(0.3)  # Deezer permite ~50 pedidos cada 5 segundos
+            time.sleep(0.3)  # Deezer allows ~50 requests per 5 seconds
             resp = requests.get(
                 f"{DEEZER_API}/search",
-                params={"q": f"{artista} {titulo}", "limit": 5},
+                params={"q": f"{artist} {title}", "limit": 5},
                 timeout=10,
             )
             if resp.status_code != 200:
                 return None
-            for resultado in resp.json().get("data") or []:
-                if artista.lower() in resultado["artist"]["name"].lower():
-                    track_id = resultado["id"]
+            for result in resp.json().get("data") or []:
+                if artist.lower() in result["artist"]["name"].lower():
+                    track_id = result["id"]
                     break
             if track_id is None:
                 return None
@@ -81,18 +80,18 @@ def buscar_bpm_deezer(titulo, artista):
     except (requests.RequestException, ValueError, KeyError):
         return None
 
-    # Deezer devuelve 0 cuando no analizó el tema.
+    # Deezer returns 0 when it hasn't analyzed the track.
     if not bpm:
         return None
     return float(bpm)
 
 
-def buscar_bpm_getsongbpm(titulo, artista):
+def search_bpm_getsongbpm(title, artist):
     """
-    Busca un track en getsongbpm.com por título + artista.
-    Devuelve el BPM (float) si lo encuentra, o None si no.
+    Searches for a track on getsongbpm.com by title + artist.
+    Returns BPM (float) if found, None otherwise.
     """
-    lookup = f"song:{titulo} artist:{artista}"
+    lookup = f"song:{title} artist:{artist}"
     params = {
         "api_key": config.GETSONGBPM_API_KEY,
         "type": "both",
@@ -113,15 +112,15 @@ def buscar_bpm_getsongbpm(titulo, artista):
         data = resp.json()
     except ValueError:
         return None
-    resultados = data.get("search") or []
-    # getsongbpm.com a veces devuelve un solo resultado como dict en vez
-    # de una lista de un elemento, y "error" (string) cuando no hay match.
-    if isinstance(resultados, dict):
-        resultados = [resultados]
-    if not resultados or not isinstance(resultados, list):
+    results = data.get("search") or []
+    # getsongbpm.com sometimes returns a single result as a dict instead
+    # of a list with one element, and "error" (string) when no match.
+    if isinstance(results, dict):
+        results = [results]
+    if not results or not isinstance(results, list):
         return None
 
-    tempo = resultados[0].get("tempo")
+    tempo = results[0].get("tempo")
     try:
         return float(tempo)
     except (TypeError, ValueError):
@@ -129,7 +128,7 @@ def buscar_bpm_getsongbpm(titulo, artista):
 
 
 def main():
-    init_db()  # por si todavía no corriste ningún otro paso
+    init_db()  # just in case you haven't run any other step yet
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -142,50 +141,50 @@ def main():
         WHERE tracks.bpm IS NULL
         """
     )
-    pendientes = cursor.fetchall()
+    pending = cursor.fetchall()
 
-    print(f"Tracks sin BPM: {len(pendientes)}\n")
+    print(f"Tracks without BPM: {len(pending)}\n")
     if not config.GETSONGBPM_API_KEY:
         print(
-            "(GETSONGBPM_API_KEY no está configurada: busco solo en Deezer.\n"
-            " Es opcional, Deezer suele alcanzar.)\n"
+            "(GETSONGBPM_API_KEY not configured: searching Deezer only.\n"
+            " It's optional, Deezer usually is enough.)\n"
         )
 
-    encontrados = {"deezer": 0, "getsongbpm": 0}
-    for i, row in enumerate(pendientes, start=1):
-        # Si el disco tiene varios artistas los guardamos como
-        # "Artista 1 / Artista 2"; para buscar usamos solo el primero.
-        artista = row["artist"].split(" / ")[0]
+    found = {"deezer": 0, "getsongbpm": 0}
+    for i, row in enumerate(pending, start=1):
+        # If the record has multiple artists we store them as
+        # "Artist 1 / Artist 2"; for searching we use only the first.
+        artist = row["artist"].split(" / ")[0]
 
-        bpm = buscar_bpm_deezer(row["title"], artista)
-        fuente = "deezer"
+        bpm = search_bpm_deezer(row["title"], artist)
+        source = "deezer"
 
         if not bpm and config.GETSONGBPM_API_KEY:
-            bpm = buscar_bpm_getsongbpm(row["title"], artista)
-            fuente = "getsongbpm"
+            bpm = search_bpm_getsongbpm(row["title"], artist)
+            source = "getsongbpm"
 
         if bpm:
             cursor.execute(
                 "UPDATE tracks SET bpm = ?, bpm_source = ? WHERE id = ?",
-                (bpm, fuente, row["id"]),
+                (bpm, source, row["id"]),
             )
-            registrar_bpm_fuente(conn, row["id"], fuente, bpm)
+            registrar_bpm_fuente(conn, row["id"], source, bpm)
             conn.commit()
-            encontrados[fuente] += 1
-            print(f"[{i}/{len(pendientes)}] OK  {row['artist']} - {row['title']} -> {bpm:g} BPM ({fuente})")
+            found[source] += 1
+            print(f"[{i}/{len(pending)}] OK  {row['artist']} - {row['title']} -> {bpm:g} BPM ({source})")
         else:
-            print(f"[{i}/{len(pendientes)}] --  {row['artist']} - {row['title']} (no encontrado)")
+            print(f"[{i}/{len(pending)}] --  {row['artist']} - {row['title']} (not found)")
 
         time.sleep(0.3)
 
     conn.close()
 
-    total_ok = sum(encontrados.values())
+    total_ok = sum(found.values())
     print("\n" + "=" * 50)
-    print(f"BPM encontrado automáticamente para {total_ok} de {len(pendientes)} tracks")
-    print(f"(Deezer: {encontrados['deezer']}, getsongbpm: {encontrados['getsongbpm']}).")
-    print("Nada queda validado solo: confirmalos en el editor, que ahí")
-    print("ves todas las fuentes de cada track: python edit_bpm.py")
+    print(f"BPM found automatically for {total_ok} of {len(pending)} tracks")
+    print(f"(Deezer: {found['deezer']}, getsongbpm: {found['getsongbpm']}).")
+    print("Nothing validates itself: confirm them in the editor, where you")
+    print("see all sources for each track: python edit_bpm.py")
 
 
 if __name__ == "__main__":

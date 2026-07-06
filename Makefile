@@ -1,36 +1,36 @@
-# Atajos para no tener que acordarse de los comandos.
+# Shortcuts so you don't have to remember the commands.
 #
-# Uso:
-#   make            -> muestra esta ayuda
-#   make setup      -> instala todo (una sola vez)
-#   make fetch      -> paso 1: colección y tapas desde Discogs
-#   make beatport   -> paso 2: BPM y key desde Beatport, para TODOS
-#                      los tracks (make beatport n=5 para probar)
-#   make bandcamp   -> paso 3: tapas/duraciones que falten (Bandcamp)
-#   make spotify    -> paso 4: último respaldo (tapa, duraciones, ISRC)
-#   make analizar   -> paso 5: mide lo que Beatport no tuvo, desde
-#                      YouTube (make analizar n=5 para probar con 5)
-#   make bpm        -> paso 6: última red para BPM (Deezer, opcional)
-#   make auditar    -> re-chequea lo medido con la versión vieja
-#                      (una sola vez; make auditar n=5 para probar)
-#   make editar     -> paso 7: editor y VALIDADOR de BPM y key (la ✓
-#                      la ponés vos ahí, viendo todas las fuentes)
-#   make render     -> paso 8: genera todas las etiquetas
-#   make prueba     -> paso 9 en modo de prueba (sin impresora)
-#   make print      -> paso 9: imprime lo pendiente
+# Usage:
+#   make            -> show this help
+#   make setup      -> install everything (one time only)
+#   make fetch      -> step 1: collection and covers from Discogs
+#   make beatport   -> step 2: BPM and key from Beatport, for ALL
+#                      tracks (make beatport n=5 to test)
+#   make bandcamp   -> step 3: missing covers/durations (Bandcamp)
+#   make spotify    -> step 4: final fallback (cover, durations, ISRC)
+#   make analizar   -> step 5: measures what Beatport didn't have, from
+#                      YouTube (make analizar n=5 to test with 5)
+#   make bpm        -> step 6: last resort for BPM (Deezer, optional)
+#   make auditar    -> re-checks measurements from old version
+#                      (one time only; make auditar n=5 to test)
+#   make editar     -> step 7: BPM and key editor and VALIDATOR (you put
+#                      the ✓ there, seeing all sources)
+#   make render     -> step 8: generates all labels
+#   make prueba     -> step 9 in test mode (no printer)
+#   make print      -> step 9: prints pending labels
 #
-# Los pasos con filtro aceptan d=texto (d de "disco"):
-#   make render d=aphex   -> solo discos que contengan "aphex"
-#   make ver d=aphex      -> lo mismo + los abre en Vista Previa
+# Steps with filter accept d=text (d for "disco"/record):
+#   make render d=aphex   -> only records containing "aphex"
+#   make ver d=aphex      -> same + opens them in Preview
 #   make prueba d=aphex
 #   make print d=aphex
 #
-# Y para hacer todo de una (fetch + beatport + bandcamp + spotify +
+# And to do everything at once (fetch + beatport + bandcamp + spotify +
 # bpm + render):
 #   make todo
 
-# uv vive en ~/.local/bin, que no siempre está en el PATH de make,
-# así que lo buscamos y si no, usamos esa ruta directamente.
+# uv lives in ~/.local/bin, which is not always in make's PATH,
+# so we search for it and if not found, use that path directly.
 UV := $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
 
 PYTHON := .venv/bin/python
@@ -45,7 +45,7 @@ setup:
 	@test -d .venv || "$(UV)" venv --python 3.12 .venv
 	"$(UV)" pip install -r requirements.txt --python $(PYTHON)
 	@test -f .env || cp .env.example .env
-	@echo "Listo. Ahora completá tus datos en el archivo .env y corré: make fetch"
+	@echo "Ready. Now fill in your data in the .env file and run: make fetch"
 
 fetch:
 	$(PYTHON) fetch_discogs.py
@@ -71,7 +71,7 @@ auditar:
 editar:
 	$(PYTHON) edit_bpm.py
 
-# (fallback: el viejo flujo por CSV sigue andando con export/import)
+# (fallback: the old CSV workflow still works with export/import)
 export:
 	$(PYTHON) bpm_manual.py export
 
@@ -90,5 +90,5 @@ prueba:
 print:
 	$(PYTHON) print_labels.py $(d)
 
-# make todo -> corre todos los pasos automáticos de una (el print queda a mano)
+# make todo -> runs all automatic steps at once (printing is manual)
 todo: fetch beatport bandcamp spotify bpm render

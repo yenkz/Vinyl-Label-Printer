@@ -1,239 +1,209 @@
 # Vinyl Label Printer
 
-Genera e imprime etiquetas con la tapa del disco, el sello, la fecha
-de edición y la lista de tracks de tus vinilos (posición A1/A2/B1...,
-título, duración, BPM y tonalidad en notación Camelot), a partir de
-tu colección de Discogs, para pegar en la funda de cada disco.
+Generates and prints labels with the album cover, record label, release date,
+and track list of your vinyl records (position A1/A2/B1..., title, duration,
+BPM and key in Camelot notation) from your Discogs collection, to stick on each record sleeve.
 
-Las fuentes de datos, en orden de prioridad:
+Data sources, in order of priority:
 
-1. **Discogs** — la fuente maestra: el disco, el sello, el catálogo,
-   la fecha de edición, la tapa (de la edición real del vinilo) y la
-   lista de tracks.
-2. **Beatport** — BPM y tonalidad (key), lo suyo en música
-   electrónica. Se consulta **para todos los tracks**, sí o sí: es la
-   referencia de BPM. Sin cuenta ni API key.
-3. **Medición propia (YouTube)** — el fallback de BPM: lo que
-   Beatport no tiene se busca en Bandcamp/YouTube/SoundCloud, se baja
-   el audio y se mide localmente con dos detectores.
-4. **Deezer** — última red para BPM (opcional, rápido).
-5. **Bandcamp** — respaldo para lo que falte (tapa, duraciones),
-   ideal para música underground y sellos chicos. Sin cuenta.
-6. **Spotify** — último respaldo (tapa, duraciones, ISRC). Opcional,
-   requiere credenciales gratis.
+1. **Discogs** — the master source: the record, label, catalog number,
+   release date, cover art (from the actual vinyl edition), and track list.
+2. **Beatport** — BPM and key (tonality), the standard for electronic music.
+   Consulted **for all tracks**, without exception: it's the BPM reference.
+   No account or API key required.
+3. **Own measurement (YouTube)** — BPM fallback: what Beatport doesn't have
+   is searched on Bandcamp/YouTube/SoundCloud, the audio is downloaded and
+   measured locally with two detectors.
+4. **Deezer** — last resort for BPM (optional, fast).
+5. **Bandcamp** — backup for missing data (cover, durations), ideal for
+   underground music and small labels. No account needed.
+6. **Spotify** — final fallback (cover, durations, ISRC). Optional, requires
+   free credentials.
 
-El BPM de cada track guarda **de qué fuente salió**, y el editor
-(paso 7) muestra todas las fuentes lado a lado. Nada se da por bueno
-solo: **la validación es siempre manual** — la ✓ la ponés vos, track
-por track, en el editor.
+Each track's BPM **records which source it came from**, and the editor
+(step 7) displays all sources side by side. Nothing is taken at face value:
+**validation is always manual** — you put the ✓ yourself, track by track, in the editor.
 
-Pensado para imprimir en una **Brother QL** con rollo continuo de
-62mm (DK-22205).
+Designed to print on a **Brother QL** with a continuous 62mm roll (DK-22205).
 
-## Qué impresora comprar
+## Which printer to buy
 
-- **Brother QL-800** (recomendada): rápida, barata, y soportada por
-  todo el software. Es la opción segura.
-- **Brother QL-600 / QL-600B**: también anda con este proyecto (más
-  lenta y algo más barata). Si la elegís, poné `PRINTER_MODEL = "QL-600"`
-  en `config.py`.
+- **Brother QL-800** (recommended): fast, affordable, and fully supported
+  by this software. The safe choice.
+- **Brother QL-600 / QL-600B**: also works with this project (slower and
+  slightly cheaper). If you choose it, set `PRINTER_MODEL = "QL-600"`
+  in `config.py`.
 
-Las dos usan los mismos rollos DK. Para esto alcanza el **rollo
-continuo blanco de 62mm (DK-22205)**: cada etiqueta sale del largo
-exacto que necesite según la cantidad de tracks.
+Both use the same DK rolls. For this project, the **continuous white 62mm roll
+(DK-22205)** is enough: each label comes out exactly as long as needed based on the number of tracks.
 
-> Ojo: son impresoras térmicas directas, sin tinta. La impresión
-> dura años pero se va desvaneciendo con el calor, el sol y el
-> contacto directo con fundas de PVC blando. Para fundas de
-> polietileno/papel no hay problema.
+> Note: these are direct thermal printers with no ink. Prints last for years but fade
+> with heat, sun, and direct contact with soft PVC sleeves. Paper/polyethylene
+> sleeves have no problems.
 
-## Instalación (una sola vez)
+## Installation (one time only)
 
-1. Instalá Python 3 si no lo tenés (en Mac: `brew install python`).
-2. En Mac, para que la conexión USB funcione: `brew install libusb`
-3. Abrí la Terminal en esta carpeta y corré:
+1. Install Python 3 if you don't have it (on Mac: `brew install python`).
+2. On Mac, to make USB connection work: `brew install libusb`
+3. Open Terminal in this folder and run:
    ```
    make setup
    ```
-   (instala las dependencias en un entorno propio del proyecto y te
-   deja creado el archivo `.env`)
-4. Copiá `.env.example` como `.env` y completá ahí tus datos
-   personales (el `make setup` de abajo ya te lo copia solo):
-   - Tu token de Discogs (`DISCOGS_USER_TOKEN`)
-   - Tu usuario de Discogs (`DISCOGS_USERNAME`)
-   - (Opcional) tu API key de getsongbpm.com (`GETSONGBPM_API_KEY`) —
-     los BPM se buscan primero en Deezer, que es gratis y no pide
-     ninguna clave, así que esto casi nunca hace falta.
-   - (Opcional) las credenciales de una app de Spotify
-     (`SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET`, gratis en
-     https://developer.spotify.com/dashboard) — sirven para el paso
-     4, el último respaldo: tapa, duraciones e ISRC que ninguna otra
-     fuente tuvo. Ojo: Spotify ya **no** da el BPM a las apps
-     nuevas (bloqueado desde nov 2024), para eso están Beatport,
-     Deezer y el análisis de audio. Beatport y Bandcamp no piden
-     credenciales: esos pasos andan sin configurar nada.
+   (installs dependencies in a project-specific environment and creates the `.env` file)
+4. Copy `.env.example` as `.env` and fill in your personal data there
+   (the `make setup` above already copies it for you):
+   - Your Discogs token (`DISCOGS_USER_TOKEN`)
+   - Your Discogs username (`DISCOGS_USERNAME`)
+   - (Optional) your getsongbpm.com API key (`GETSONGBPM_API_KEY`) —
+     BPM is searched first on Deezer, which is free and needs no key, so this
+     is rarely needed.
+   - (Optional) credentials for a Spotify app
+     (`SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET`, free at
+     https://developer.spotify.com/dashboard) — used for step 4, the final
+     fallback: cover, durations, and ISRC that no other source has. Note:
+     Spotify **no longer** provides BPM to new apps (blocked since Nov 2024);
+     that's what Beatport, Deezer, and audio analysis are for. Beatport and
+     Bandcamp don't need credentials: those steps work unconfigured.
 
-   El `.env` no se sube a git, así que tus tokens quedan solo en tu
-   computadora. Los ajustes técnicos (modelo de impresora, fuentes,
-   etc.) siguen en `config.py`: tocá `PRINTER_MODEL` ahí si tu
-   impresora no es la QL-800.
+   The `.env` file is not uploaded to git, so your tokens stay only on your
+   computer. Technical settings (printer model, fonts, etc.) remain in `config.py`:
+   edit `PRINTER_MODEL` there if your printer isn't the QL-800.
 
-## Uso (cada vez que quieras generar etiquetas)
+## Usage (each time you want to generate labels)
 
-Corré estos scripts **en orden**, cada uno hace un solo paso:
+Run these scripts **in order**, each does one step:
 
 ```
-python fetch_discogs.py    # 1. Trae tu colección y las tapas de Discogs
-python enrich_beatport.py  # 2. BPM y tonalidad (key) desde Beatport,
-                           #    para TODOS los tracks (la referencia)
-python enrich_bandcamp.py  # 3. Tapas/duraciones que falten (Bandcamp)
-python enrich_spotify.py   # 4. Último respaldo: tapa, duraciones e
-                           #    ISRC desde Spotify (opcional)
-python analyze_bpm.py      # 5. El fallback: mide el BPM de lo que
-                           #    Beatport no tuvo, bajando el audio de
-                           #    YouTube (¡lento pero efectivo!)
-python enrich_bpm.py       # 6. Última red para BPM (Deezer, opcional)
-python edit_bpm.py         # 7. El editor: cargar/corregir a mano y
-                           #    VALIDAR cada BPM viendo sus fuentes
-python render_labels.py    # 8. Genera las imágenes de las etiquetas
-python print_labels.py     # 9. Imprime lo pendiente en la Brother QL
+python fetch_discogs.py    # 1. Fetch your collection and covers from Discogs
+python enrich_beatport.py  # 2. BPM and key from Beatport,
+                           #    for ALL tracks (the reference)
+python enrich_bandcamp.py  # 3. Missing covers/durations (Bandcamp)
+python enrich_spotify.py   # 4. Final fallback: cover, durations, and
+                           #    ISRC from Spotify (optional)
+python analyze_bpm.py      # 5. The BPM fallback: measures BPM for what
+                           #    Beatport didn't have, downloading audio from
+                           #    YouTube (slow but effective!)
+python enrich_bpm.py       # 6. Last resort for BPM (Deezer, optional)
+python edit_bpm.py         # 7. The editor: load/correct by hand and
+                           #    VALIDATE each BPM by viewing its sources
+python render_labels.py    # 8. Generate the label images
+python print_labels.py     # 9. Print pending labels on the Brother QL
 ```
 
-Notas:
+Notes:
 
-- El paso 1 baja también la tapa de cada disco directo de Discogs
-  (la foto de la edición real del vinilo, que sale impresa en el
-  encabezado de la etiqueta, tramada a blanco y negro). Las tapas
-  quedan en `covers/`, una por disco, y no se pisan: para rehacer
-  una, borrá ese archivo de `covers/` y volvé a correr el paso. Las
-  tapas muy oscuras o fotográficas pierden bastante al tramarse: la
-  térmica no tiene grises.
-- El paso 2 busca **cada track de tu colección** en Beatport — tenga
-  BPM o no: es la fuente de referencia y se consulta sí o sí — y trae
-  el BPM oficial y la tonalidad (key), que en la etiqueta sale en
-  notación Camelot ("8A") para mezclar armónicamente. No necesita
-  cuenta: usa el mismo acceso anónimo que el reproductor embebido de
-  Beatport. Solo guarda datos si el candidato coincide en artista,
-  título y duración con lo que dice Discogs. Cada respuesta queda
-  anotada como fuente del track (visible en el editor). Si el track
-  ya tenía un BPM medido y Beatport dice lo mismo, la duda queda
-  resuelta (pero la ✓ la ponés vos en el paso 7); si dicen distinto,
-  queda marcado como dudoso con el otro valor a un click. Lo que
-  cargaste a mano nunca se pisa.
-- El paso 3 (Bandcamp) completa lo que a Discogs le falte — tapa y
-  duraciones — buscando el álbum con la API pública del buscador de
-  bandcamp.com. Para vinilos underground y de sellos chicos suele
-  ser la única fuente que los tiene. Bandcamp no publica BPM ni key.
-- El paso 4 (Spotify, opcional) es el último respaldo: tapa,
-  duraciones e ISRC que sigan faltando. Si el disco no está en
-  Spotify — normal con vinilos de nicho — no pasa nada, ya casi
-  todo vino de los pasos anteriores.
-- El paso 5 es el **fallback de Beatport**: busca cada track sin BPM
-  en Bandcamp, YouTube o SoundCloud (en ese orden), verificando que
-  la duración coincida con la de Discogs, baja el audio a una carpeta
-  temporal, mide el BPM localmente y borra el audio. Tarda ~30s por
-  track y se puede cortar con Ctrl+C y retomar cuando quieras. Si
-  YouTube se pone en modo anti-bot ("Sign in to confirm you're not a
-  bot"), el script sigue por SoundCloud solo; YouTube se destraba
-  solo en unas horas, o al toque si configurás
-  `YOUTUBE_COOKIES_NAVEGADOR` en `config.py`. Evitá correr dos
-  análisis a la vez, que es lo que despierta al anti-bot.
-  Para probarlo primero con pocos: `python analyze_bpm.py 5`.
-  El tempo se mide con **dos detectores** (deeprhythm, una red
-  neuronal muy precisa en música electrónica, y librosa): si
-  coinciden, el número es de fiar; si no —el clásico error de medir
-  89 donde el tempo real es 134— el track queda marcado como
-  *dudoso* y en el paso 7 lo resolvés con un click, con el otro
-  candidato ahí nomás como botón.
-- El paso 6 (Deezer, opcional) es la última red: busca BPM para lo
-  que ni Beatport ni la medición pudieron. Sirve para música
-  conocida; para vinilos de sellos chicos Deezer no suele tener el
-  BPM analizado.
-- Si ya tenías BPMs medidos con la versión vieja del análisis (un
-  solo detector), corré **una vez** `python audit_bpm.py`: re-mide
-  todos los BPM automáticos viejos, corrige los que estaban mal
-  medidos y anota la re-medición como fuente — todo queda listo
-  para validar en el paso 7.
-- El paso 7 (`make editar`) levanta una página local (solo la ve tu
-  computadora) con toda la colección: buscador, un casillero de BPM
-  y otro de key por track, y cada cambio se guarda solo. La key la
-  podés escribir en Camelot ("8A") o musical ("Am", "f# minor").
-  Lo que cargás ahí queda como `manual` y nada lo pisa. Si preferís
-  planilla, el viejo flujo CSV sigue disponible:
-  `python bpm_manual.py export` / `import`.
-- El paso 7 es donde se **valida**: cada track muestra, como
-  píldoras, todas las fuentes de las que salió un BPM ("beatport
-  128" · "youtube 127.9" · "deezer 128") con el detalle de dónde
-  salió cada número. La ✓ verde de "validado" **nunca se pone sola**,
-  ni aunque todas las fuentes coincidan: la ponés vos, con el botón ✓
-  (el valor actual está bien) o clickeando la píldora de una fuente
-  (ese valor pasa a ser el BPM del track y queda validado, porque lo
-  elegiste vos viendo todas las opciones). Escribir un BPM a mano
-  también cuenta como validarlo. Los dudosos (fuentes en desacuerdo)
-  quedan resaltados con el valor alternativo a un click. El objetivo
-  es ver arriba "colección completa: N/N BPM validados ✓" — ahí
-  estás para imprimir tranquilo. En las etiquetas, un BPM dudoso sin
-  confirmar sale con asterisco (ej: "129*").
-- El paso 1 lo podés repetir cuando compres discos nuevos: actualiza
-  y agrega sin duplicar, **sin perder los BPM que ya cargaste**, y
-  saca de la base los discos que ya no estén en tu colección.
-  Discogs limita los pedidos, así que tarda ~1 segundo por disco.
-- El paso 8 puede generar solo algunos discos y mostrártelos antes
-  de imprimir: `python render_labels.py aphex --ver` genera las
-  etiquetas de los discos que contengan "aphex" y las abre en Vista
-  Previa para que las chequees.
-- El paso 9 tiene un **modo de prueba** que no necesita impresora:
-  `python print_labels.py --prueba` te muestra qué etiquetas
-  saldrían y cuántos centímetros de rollo usarían, sin imprimir ni
-  gastar nada.
-- El paso 9 solo imprime las etiquetas nuevas: las ya impresas se
-  mueven a `labels_output/impresas/`. Para reimprimir una, movela de
-  vuelta a `labels_output/`. También podés imprimir solo algunas:
-  `python print_labels.py aphex` imprime las que contengan "aphex"
-  en el nombre del archivo.
+- Step 1 also downloads the cover of each record directly from Discogs
+  (the photo of the actual vinyl edition, printed at the top of the label,
+  halftoned to black and white). Covers are saved in `covers/`, one per record,
+  and don't overwrite each other: to redo one, delete that file from `covers/` and
+  run the step again. Very dark or photographic covers lose a lot in halftoning:
+  thermal printing has no grays.
+- Step 2 searches **every track in your collection** on Beatport — whether it has
+  BPM or not: it's the reference source and is consulted without fail — and fetches
+  the official BPM and key, which displays on the label in Camelot notation ("8A")
+  for harmonic mixing. No account needed: it uses the same anonymous access as
+  Beatport's embedded player. It only saves data if the candidate matches artist,
+  title, and duration with what Discogs says. Each response is noted as the track's
+  source (visible in the editor). If a track already had a measured BPM and Beatport
+  says the same, the doubt is resolved (but you put the ✓ in step 7); if they differ,
+  it's marked as questionable with the other value one click away. Anything you
+  entered manually is never overwritten.
+- Step 3 (Bandcamp) fills in what Discogs is missing — cover and durations —
+  by searching the album with Bandcamp search API. For underground vinyls and
+  small labels, it's often the only source that has them. Bandcamp doesn't publish
+  BPM or key.
+- Step 4 (Spotify, optional) is the final fallback: cover, durations, and ISRC
+  still missing. If the record isn't on Spotify — normal for niche vinyls — no
+  problem, almost everything came from earlier steps.
+- Step 5 is the **Beatport fallback**: searches each track without BPM on
+  Bandcamp, YouTube, or SoundCloud (in that order), verifying the duration matches
+  Discogs', downloads the audio to a temp folder, measures BPM locally, and deletes
+  it. Takes ~30s per track and can be stopped with Ctrl+C and resumed later. If
+  YouTube enters anti-bot mode ("Sign in to confirm you're not a bot"), the script
+  continues on SoundCloud only; YouTube unblocks itself in a few hours, or immediately
+  if you set `YOUTUBE_COOKIES_NAVEGADOR` in `config.py`. Avoid running two analyses
+  at once, that's what triggers the anti-bot. To test with fewer tracks first:
+  `python analyze_bpm.py 5`. Tempo is measured with **two detectors** (deeprhythm,
+  a neural net very accurate for electronic music, and librosa): if they agree,
+  the number is reliable; if not — the classic error of measuring 89 when the real
+  tempo is 134 — the track is marked as *questionable* and in step 7 you resolve
+  it with a click, with the other candidate right there as a button.
+- Step 6 (Deezer, optional) is the last resort: searches for BPM where neither
+  Beatport nor measurement could find it. Works for well-known music; for small
+  label vinyls Deezer often doesn't have the BPM analyzed.
+- If you already had BPM measured with the old analysis version (single detector),
+  run **once** `python audit_bpm.py`: re-measures all old automatic BPMs, corrects
+  ones that were measured wrong, and notes the re-measurement as source — everything
+  is ready for step 7 validation.
+- Step 7 (`make editar`) launches a local page (only you see it) with your whole
+  collection: search bar, BPM and key fields per track, and each change auto-saves.
+  You can write the key in Camelot ("8A") or musical notation ("Am", "f# minor").
+  Anything you enter there is saved as `manual` and nothing overwrites it. If you
+  prefer a spreadsheet, the old CSV flow still works: `python bpm_manual.py export` / `import`.
+- Step 7 is where **validation** happens: each track shows, as pills, all the BPM
+  sources ("beatport 128" · "youtube 127.9" · "deezer 128") with details of where
+  each number came from. The green ✓ for "validated" **never sets itself**, not
+  even if all sources agree: you set it, with the ✓ button (current value is good)
+  or by clicking a source pill (that value becomes the track's BPM and is validated
+  because you chose it seeing all options). Typing a BPM manually also counts as
+  validating it. Questionable ones (sources disagreeing) are highlighted with the
+  alternate value one click away. The goal is to see "collection complete: N/N BPM
+  validated ✓" at the top — then you're ready to print without worry. On labels,
+  an unconfirmed questionable BPM shows with an asterisk (e.g., "129*").
+- Step 1 can be repeated when you buy new records: it updates and adds without
+  duplicating, **without losing the BPM you already entered**, and removes from
+  the database records no longer in your collection. Discogs rate-limits, so it
+  takes ~1 second per record.
+- Step 8 can generate just some records and show them before printing: `python render_labels.py aphex --ver`
+  generates labels for records containing "aphex" and opens them in Preview to check.
+- Step 9 has a **test mode** that doesn't need a printer: `python print_labels.py --prueba`
+  shows you what labels would print and how many centimeters of roll they'd use,
+  without printing or wasting anything.
+- Step 9 only prints new labels: already-printed ones move to `labels_output/impresas/`.
+  To reprint one, move it back to `labels_output/`. You can also print just some:
+  `python print_labels.py aphex` prints those containing "aphex" in the filename.
 
-## Estructura del proyecto
+## Project structure
 
 ```
-.env                -> tus datos personales (tokens) — no se sube a git
-config.py           -> ajustes técnicos (impresora, etiquetas, fuentes)
-db.py               -> maneja la base de datos local (SQLite)
-comunes.py          -> helpers compartidos (matching, tapas, keys)
-fetch_discogs.py    -> Paso 1 (colección + tapas, fuente maestra)
-enrich_beatport.py  -> Paso 2 (BPM y key desde Beatport, sí o sí)
-enrich_bandcamp.py  -> Paso 3 (tapas/duraciones que falten)
-enrich_spotify.py   -> Paso 4 (último respaldo — opcional)
-analyze_bpm.py      -> Paso 5 (el fallback: mide el BPM del audio)
-enrich_bpm.py       -> Paso 6 (última red: Deezer — opcional)
-audit_bpm.py        -> re-chequeo de lo medido con la versión vieja
-edit_bpm.py         -> Paso 7 (editor y validador de BPM y key)
-bpm_manual.py       -> Paso 7 alternativo (export/import CSV)
-render_labels.py    -> Paso 8
-print_labels.py     -> Paso 9
-vinyl_labels.db     -> se crea solo, acá vive toda tu colección
-covers/             -> tapas bajadas (una por disco)
-labels_output/      -> imágenes generadas pendientes de imprimir
-labels_output/impresas/ -> las que ya salieron por la impresora
+.env                -> your personal data (tokens) — not uploaded to git
+config.py           -> technical settings (printer, labels, fonts)
+db.py               -> manages local database (SQLite)
+comunes.py          -> shared helpers (matching, covers, keys)
+fetch_discogs.py    -> Step 1 (collection + covers, master source)
+enrich_beatport.py  -> Step 2 (BPM and key from Beatport, always)
+enrich_bandcamp.py  -> Step 3 (missing covers/durations)
+enrich_spotify.py   -> Step 4 (final fallback — optional)
+analyze_bpm.py      -> Step 5 (fallback: measures BPM from audio)
+enrich_bpm.py       -> Step 6 (last resort: Deezer — optional)
+audit_bpm.py        -> re-checks old measurements from old version
+edit_bpm.py         -> Step 7 (editor and validator for BPM and key)
+bpm_manual.py       -> Step 7 alternative (CSV export/import)
+render_labels.py    -> Step 8
+print_labels.py     -> Step 9
+vinyl_labels.db     -> auto-created, stores your entire collection
+covers/             -> downloaded covers (one per record)
+labels_output/      -> generated images pending printing
+labels_output/impresas/ -> already printed labels
 ```
 
-## Problemas comunes
+## Common issues
 
-- **"No encuentro la fuente configurada"**: abrí `config.py` y
-  cambiá `FONT_PATH` por la ruta de alguna fuente .ttf que sí tengas
-  instalada. El script sigue funcionando igual, solo se ve más feo.
+- **"Font not found"**: open `config.py` and change `FONT_PATH` to the path
+  of a .ttf font you actually have installed. The script still works, just
+  looks less polished.
 
-- **La impresora no imprime / no la detecta**: fijate que esté
-  enchufada y encendida, y en Mac que hayas instalado libusb. Si
-  sigue sin aparecer, corré `brother_ql discover`, copiá el
-  identificador que te muestre y pegalo en `config.py`, en
-  `PRINTER_IDENTIFIER`.
+- **Printer won't print / not detected**: check it's plugged in and turned on,
+  and on Mac that you've installed libusb. If it still doesn't show up, run
+  `brother_ql discover`, copy the ID it shows and paste it in `config.py`,
+  under `PRINTER_IDENTIFIER`.
 
-- **Modo "Editor Lite"**: si tu impresora tiene ese botón activado
-  (una luz prendida), hay que apagarlo manteniendo el botón apretado
-  unos segundos — bloquea la impresión por USB.
+- **"Editor Lite" mode**: if your printer has that button turned on (light
+  on), you need to turn it off by holding the button for a few seconds —
+  it blocks USB printing.
 
-- **Muchos tracks sin BPM**: es normal, sobre todo con ediciones de
-  nicho o vinilos viejos. Usá `bpm_manual.py export` / `import` para
-  completarlos vos mismo con Shazam, Tunebat, o tu oído. Ojo también
-  con los BPM automáticos en música electrónica: a veces vienen al
-  doble o a la mitad del tempo real (70 en vez de 140).
+- **Many tracks without BPM**: it's normal, especially for niche editions or
+  old vinyls. Use `bpm_manual.py export` / `import` to fill them in yourself
+  with Shazam, Tunebat, or your ear. Also watch out for automatic BPM in
+  electronic music: sometimes they're double or half the real tempo (70
+  instead of 140).

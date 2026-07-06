@@ -1,49 +1,49 @@
 """
-audit_bpm.py — Revisión de los BPM medidos con la versión vieja.
+audit_bpm.py — Audit of BPMs measured with the old version.
 
-Antes, analyze_bpm.py medía el tempo con un solo detector (librosa),
-que en música electrónica a veces se engancha a un pulso que no es:
-mide 89 donde el tempo real es 134 (un error de 2/3 que el ajuste de
-rango no puede corregir, porque los dos números son tempos válidos).
+Before, analyze_bpm.py measured tempo with a single detector (librosa),
+which in electronic music sometimes locks onto the wrong beat:
+it measures 89 where the real tempo is 134 (a 2/3 error that range
+adjustment can't fix, because both numbers are valid tempos).
 
-Este script agarra todos los tracks con BPM automático que todavía
-no re-mediste con la versión nueva (los de la versión vieja y también
-los que vinieron de Deezer), vuelve a bajar el audio y los re-mide
-con los dos detectores:
+This script takes all tracks with automatic BPM that you haven't
+re-measured with the new version (the ones from the old version and also
+ones from Deezer), downloads the audio again, and re-measures them with
+both detectors:
 
-  - si la medición nueva coincide con la guardada, la re-medición
-    queda anotada en bpm_sources: en el editor vas a ver las dos
-    fuentes de acuerdo y lo validás con un click (nada se valida
-    solo: la ✓ verde siempre la ponés vos);
-  - si no coincide, guarda el valor nuevo (deeprhythm, mucho más
-    preciso en electrónica) y deja el viejo como alternativa, con el
-    track marcado como dudoso para que lo resuelvas en el editor
-    (python edit_bpm.py) — un click y listo.
+  - if the new measurement matches the saved one, the re-measurement
+    is noted in bpm_sources: in the editor you'll see both sources
+    agree and validate it with one click (nothing validates itself:
+    you always put the green checkmark);
+  - if it doesn't match, saves the new value (deeprhythm, much more
+    precise on electronic music) and leaves the old one as alternative,
+    with the track marked as doubtful so you resolve it in the editor
+    (python edit_bpm.py) — one click and done.
 
-Se puede correr las veces que quieras: los ya re-medidos con los dos
-detectores no se re-chequean (eso incluye todo lo que analice
-analyze_bpm.py de acá en adelante).
+You can run it as many times as you like: those already re-measured with
+both detectors won't be re-checked (that includes everything analyze_bpm.py
+analyzes from now on).
 
-Cómo correrlo:
-    python audit_bpm.py        # revisa todos
-    python audit_bpm.py 5      # solo 5 (para probar)
+How to run it:
+    python audit_bpm.py        # audit all
+    python audit_bpm.py 5      # only 5 (for testing)
 
-Se puede cortar con Ctrl+C: lo ya revisado queda guardado.
+You can stop with Ctrl+C: what's already reviewed is saved.
 """
 
 import sys
 import tempfile
 import time
 
-from analyze_bpm import TOLERANCIA_BPM, analizar_track, parsear_duracion
+from analyze_bpm import TOLERANCE_BPM, analyze_track, parsear_duracion
 from db import get_connection, init_db, registrar_bpm_fuente
 
 
 def main():
-    limite = None
+    limit = None
     if len(sys.argv) > 1:
         try:
-            limite = int(sys.argv[1])
+            limit = int(sys.argv[1])
         except ValueError:
             print(__doc__)
             return
@@ -51,10 +51,9 @@ def main():
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
-    # Re-medimos los BPM automáticos que no tienen todavía una medición
-    # "de la era nueva": las filas de bpm_sources con detail (el video
-    # del que salió el número) las escribió el análisis de dos
-    # detectores; las que no lo tienen vienen de la versión vieja.
+    # Re-measure automatic BPMs that don't yet have a "new era" measurement:
+    # bpm_sources rows with detail (the video the number came from) were written
+    # by two-detector analysis; those without it come from the old version.
     cursor.execute(
         """
         SELECT tracks.id, tracks.title, tracks.duration_display, tracks.bpm,
@@ -72,66 +71,66 @@ def main():
         ORDER BY releases.artist, releases.title, tracks.id
         """
     )
-    pendientes = cursor.fetchall()
-    if limite:
-        pendientes = pendientes[:limite]
+    pending = cursor.fetchall()
+    if limit:
+        pending = pending[:limit]
 
-    print(f"Tracks a revisar: {len(pendientes)}")
-    print("(vuelve a bajar cada audio y lo re-mide; tarda ~30s por track,")
-    print(" podés cortar con Ctrl+C y retomar después)\n")
+    print(f"Tracks to audit: {len(pending)}")
+    print("(downloads each audio again and re-measures; takes ~30s per track,")
+    print(" you can stop with Ctrl+C and resume later)\n")
 
-    confirmados = 0
-    corregidos = 0
+    confirmed = 0
+    corrected = 0
     with tempfile.TemporaryDirectory() as tmpdir:
-        for i, row in enumerate(pendientes, start=1):
-            etiqueta = f"[{i}/{len(pendientes)}] {row['artist']} - {row['title']}"
+        for i, row in enumerate(pending, start=1):
+            label = f"[{i}/{len(pending)}] {row['artist']} - {row['title']}"
             try:
-                nuevo, _, _, detalle = analizar_track(
+                new, _, _, detail = analyze_track(
                     row["artist"], row["title"],
                     parsear_duracion(row["duration_display"]), tmpdir,
                     row["catno"],
                 )
             except KeyboardInterrupt:
-                print("\nCortado. Lo revisado hasta acá quedó guardado.")
+                print("\nStopped. What's been audited is saved.")
                 break
             except Exception as e:
-                print(f"{etiqueta}\n   -> error, sigo con el resto: {e}")
+                print(f"{label}\n   -> error, continuing: {e}")
                 continue
 
-            if nuevo is None:
-                print(f"{etiqueta}\n   -> no pude re-medir ({detalle}), queda como está")
-            elif abs(nuevo - row["bpm"]) <= TOLERANCIA_BPM:
-                # Dos mediciones independientes coinciden: queda anotado
-                # (en el editor lo validás vos con un click).
-                registrar_bpm_fuente(conn, row["id"], "youtube", nuevo, detalle)
+            if new is None:
+                print(f"{label}\n   -> couldn't re-measure ({detail}), keeping as is")
+            elif abs(new - row["bpm"]) <= TOLERANCE_BPM:
+                # Two independent measurements agree: it's noted
+                # (in the editor you validate it with one click).
+                registrar_bpm_fuente(conn, row["id"], "youtube", new, detail)
                 conn.commit()
-                confirmados += 1
-                print(f"{etiqueta} -> {row['bpm']:g} BPM coincide (validalo en el editor)")
+                confirmed += 1
+                print(f"{label} -> {row['bpm']:g} BPM matches (validate in editor)")
             else:
-                # La medición vieja era el error típico: guardamos la
-                # nueva y dejamos la vieja a un click en el editor.
+                # The old measurement was the typical error: save the new
+                # one and leave the old one one click away in the editor.
                 cursor.execute(
                     "UPDATE tracks SET bpm = ?, bpm_alt = ?, bpm_needs_review = 1,"
                     " bpm_verified = 0 WHERE id = ?",
-                    (nuevo, row["bpm"], row["id"]),
+                    (new, row["bpm"], row["id"]),
                 )
-                registrar_bpm_fuente(conn, row["id"], "youtube", nuevo, detalle)
+                registrar_bpm_fuente(conn, row["id"], "youtube", new, detail)
                 conn.commit()
-                corregidos += 1
-                print(f"{etiqueta} -> {row['bpm']:g} parece mal medido: "
-                      f"ahora {nuevo:g} BPM (confirmalo en edit_bpm.py)")
+                corrected += 1
+                print(f"{label} -> {row['bpm']:g} seems mismeasured: "
+                      f"now {new:g} BPM (confirm in edit_bpm.py)")
 
-            time.sleep(3)  # pausa para no despertar al anti-bot de YouTube
+            time.sleep(3)  # pause to not wake YouTube's anti-bot
 
     conn.close()
     print("\n" + "=" * 50)
-    print(f"Coinciden: {confirmados} · Corregidos: {corregidos}")
-    if corregidos:
-        print("Los corregidos quedaron marcados como dudosos: dales un")
-        print("vistazo con: python edit_bpm.py (filtro 'solo dudosos')")
-    if confirmados:
-        print("Los que coinciden quedaron listos para validar con un click")
-        print("en el editor: python edit_bpm.py (filtro 'solo sin validar')")
+    print(f"Confirmed: {confirmed} · Corrected: {corrected}")
+    if corrected:
+        print("Corrected ones are marked as doubtful: take a look with:")
+        print("python edit_bpm.py (filter 'doubtful only')")
+    if confirmed:
+        print("Confirmed ones are ready to validate with one click in the editor:")
+        print("python edit_bpm.py (filter 'unvalidated only')")
 
 
 if __name__ == "__main__":

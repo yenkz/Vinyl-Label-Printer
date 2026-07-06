@@ -1,59 +1,53 @@
 """
-analyze_bpm.py — PASO 5 (el fallback de Beatport)
+analyze_bpm.py — STEP 5 (Beatport fallback)
 
-Para cada track que sigue sin BPM (porque Beatport no lo tuvo), lo
-busca en Bandcamp, YouTube o SoundCloud (en ese orden), baja el audio
-a una carpeta temporal, mide el tempo localmente y guarda el
-resultado, anotado como fuente "youtube" en bpm_sources (con el video
-del que salió). El audio se borra apenas se analiza.
+For each track that still has no BPM (because Beatport didn't have it),
+searches for it on Bandcamp, YouTube, or SoundCloud (in that order), downloads
+the audio to a temporary folder, measures the tempo locally and saves the result,
+noted as source "youtube" in bpm_sources (with the video it came from).
+The audio is deleted right after analysis.
 
-Bandcamp se prueba primero: para sellos chicos de música electrónica
-suele tener el audio original (no un repost), así que cuando está,
-es la fuente más confiable. yt-dlp no tiene un modo "búsqueda" para
-Bandcamp como sí tiene para YouTube/SoundCloud, así que primero se
-usa la API de autocompletado de bandcamp.com para encontrar la URL
-del track.
+Bandcamp is tried first: for small electronic music labels it usually has
+the original audio (not a repost), so when it's there, it's the most reliable
+source. yt-dlp doesn't have a "search" mode for Bandcamp like it does for
+YouTube/SoundCloud, so the bandcamp.com autocomplete API is used first to
+find the track URL.
 
-Cada buscador se consulta con cada artista del crédito ("B.Love /
-Jhobei" son dos búsquedas) y también con el número de catálogo del
-vinilo ("SEMID026 ..."): los sellos chicos suelen titular sus
-subidas por catálogo y no por artista.
+Each search engine is queried with each artist in the credit ("B.Love /
+Jhobei" = two searches) and also with the vinyl's catalog number ("SEMID026 ..."):
+small labels usually title their uploads by catalog number, not artist.
 
-Para no medir cualquier video, compara la duración del video con la
-duración que figura en Discogs: si no coinciden razonablemente, lo
-descarta. Los tracks sin duración en Discogs se aceptan igual, pero
-solo si el video dura entre 2 y 15 minutos.
+To avoid measuring any video, it compares the video duration with the one in
+Discogs: if they don't match reasonably, it discards it. Tracks without
+Discogs duration are accepted if the video lasts 2-15 minutes.
 
-Si ningún candidato pasa el filtro de duración pero alguno clava
-título y artista, se lo mide igual como último recurso: una duración
-distinta casi siempre es otra edición del mismo tema (la versión de
-álbum vs. la del 12", o una duración mal cargada en Discogs), y el
-tempo no cambia entre ediciones. El resultado de ese rescate queda
-SIEMPRE marcado como dudoso, con las dos duraciones anotadas en la
-fuente, para que decidas vos en el editor. Y los videos con pinta de
-"EP entero / preview del sello" quedan afuera del rescate: un
-minimix tiene varios tempos y mediría cualquier cosa.
+If no candidate passes the duration filter but one matches title and artist,
+it measures it as a last resort: different duration almost always means
+another edition of the same song (album version vs 12", or a misEntered
+Discogs duration), and tempo doesn't change between editions. That rescue
+result is ALWAYS marked as doubtful, with both durations noted in the source,
+so you decide in the editor. Videos looking like "full EP / label preview"
+are excluded from rescue: a mini-mix has multiple tempos and would measure
+anything.
 
-El tempo se mide con DOS detectores distintos (deeprhythm, una red
-neuronal entrenada con música electrónica, y librosa, el clásico).
-Si los dos coinciden, el número es confiable — pero igual NADA queda
-validado solo: la ✓ verde la ponés vos en el editor (python
-edit_bpm.py), viendo todas las fuentes. Si no coinciden — típico
-error de "un detector escuchó 89 donde el otro escucha 134" — se
-guarda el de deeprhythm igual, pero el track queda marcado como
-dudoso, con el otro candidato a un click de distancia en el editor.
+Tempo is measured with TWO different detectors (deeprhythm, a neural network
+trained on electronic music, and librosa, the classic). If both agree, the
+number is reliable — but NOTHING validates itself: you put the green checkmark
+in the editor (python edit_bpm.py), seeing all sources. If they don't agree —
+typical error of "one detector heard 89 where the other heard 134" — deeprhythm's
+is saved anyway, but the track is marked as doubtful, with the other candidate
+one click away in the editor.
 
-Como los detectores de tempo a veces devuelven el doble o la mitad,
-el resultado se acomoda al rango típico de música de club (88–176).
-Si tu colección es de otro palo (hip hop, ambient...), ajustá
-BPM_MINIMO / BPM_MAXIMO en comunes.py.
+Since tempo detectors sometimes return double or half, the result is adjusted
+to the typical club music range (88–176). If your collection is different
+(hip hop, ambient...), adjust BPM_MINIMO / BPM_MAXIMO in comunes.py.
 
-Cómo correrlo:
-    python analyze_bpm.py        # analiza todos los que faltan
-    python analyze_bpm.py 5      # solo 5 (para probar)
+How to run it:
+    python analyze_bpm.py        # analyze all that are missing
+    python analyze_bpm.py 5      # only 5 (for testing)
 
-Se puede cortar con Ctrl+C cuando quieras: lo ya analizado queda
-guardado, y la próxima vez sigue desde donde quedó.
+You can stop with Ctrl+C anytime: what's already analyzed is saved,
+and next time it continues from where it left off.
 """
 
 import difflib
@@ -73,30 +67,30 @@ import config
 from comunes import acomodar_al_rango, formatear_duracion, parsear_duracion
 from db import get_connection, init_db, registrar_bpm_fuente
 
-# Si los dos detectores difieren en más que esto (ya acomodados al
-# rango de comunes.py), el track queda marcado para revisar a mano.
-TOLERANCIA_BPM = 2.5
+# If the two detectors differ by more than this (already adjusted to
+# comunes.py range), the track is marked for manual review.
+TOLERANCE_BPM = 2.5
 
-# Cuánto puede diferir el video de la duración de Discogs para
-# considerarlo el track correcto: 20 segundos o 12%, lo que sea mayor.
-TOLERANCIA_SEG = 20
-TOLERANCIA_PORCENTAJE = 0.12
+# How much the video duration can differ from Discogs for it to be
+# considered the correct track: 20 seconds or 12%, whichever is larger.
+TOLERANCE_SECONDS = 20
+TOLERANCE_PERCENTAGE = 0.12
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
-# API pública (sin key) que usa el buscador de bandcamp.com.
+# Public API (no key) used by bandcamp.com's search engine.
 BANDCAMP_SEARCH_API = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
 
-# Dónde buscar el audio, en orden, después de probar Bandcamp. Si
-# YouTube se pone en modo anti-bot o no tiene el track, se prueba
-# SoundCloud (donde vive buena parte de la música de sellos chicos).
-BUSCADORES = [
+# Where to search for audio, in order, after trying Bandcamp.
+# If YouTube enters anti-bot mode or doesn't have the track,
+# SoundCloud is tried (where much of the small label music lives).
+SEARCHERS = [
     ("YouTube", "ytsearch6"),
     ("SoundCloud", "scsearch6"),
 ]
 
 
-def opciones_base():
+def base_options():
     ops = {
         "quiet": True,
         "no_warnings": True,
@@ -107,190 +101,185 @@ def opciones_base():
     return ops
 
 
-def resumir_error(e):
-    """Deja el error de yt-dlp en una línea entendible."""
-    texto = str(e).split("\n")[0]
-    if "Sign in to confirm" in texto:
-        return "YouTube pide login (modo anti-bot; suele pasarse solo en unas horas)"
-    if "DRM protected" in texto:
-        return "lo sirve con DRM (no se puede bajar)"
-    return texto[:120]
+def summarize_error(e):
+    """Reduces yt-dlp error to one understandable line."""
+    text = str(e).split("\n")[0]
+    if "Sign in to confirm" in text:
+        return "YouTube asking for login (anti-bot mode; usually clears in a few hours)"
+    if "DRM protected" in text:
+        return "served with DRM (cannot download)"
+    return text[:120]
 
 
-# Palabras que no dicen nada sobre QUÉ track es (aparecen en
-# cualquier título) y por eso no cuentan para comparar.
-PALABRAS_VACIAS = {"the", "and", "you", "your", "feat", "with", "mix", "original"}
+# Words that don't say anything about WHICH track it is (appear in any
+# title) and so don't count for comparison.
+EMPTY_WORDS = {"the", "and", "you", "your", "feat", "with", "mix", "original"}
 
 
-def palabras(texto):
-    """Pasa un título a un conjunto de palabras comparables."""
-    limpio = "".join(c.lower() if c.isalnum() else " " for c in texto)
-    return {p for p in limpio.split() if len(p) > 2 and p not in PALABRAS_VACIAS}
+def words(text):
+    """Converts a title to a set of comparable words."""
+    clean = "".join(c.lower() if c.isalnum() else " " for c in text)
+    return {p for p in clean.split() if len(p) > 2 and p not in EMPTY_WORDS}
 
 
-def separar_artistas(artista):
-    """Devuelve la lista de artistas de un crédito compuesto de
-    Discogs ("B.Love / Jhobei" -> ["B.Love", "Jhobei"]). En un split
-    o una colaboración el track puede estar publicado bajo cualquiera
-    de los nombres, así que hay que buscar con cada uno y dar por
-    bueno un video de cualquiera de los dos. Para "Various" o
-    "Desconocido" devuelve lista vacía (no hay artista que chequear)."""
-    if artista.lower() in ("various", "desconocido"):
+def split_artists(artist):
+    """Returns the list of artists from a composite Discogs credit
+    ("B.Love / Jhobei" -> ["B.Love", "Jhobei"]). In a split or
+    collaboration the track may be published under any of the names,
+    so each must be searched and a video from either counts as good.
+    For "Various" or "Unknown" returns empty list (no artist to check)."""
+    if artist.lower() in ("various", "unknown"):
         return []
-    return [parte.strip() for parte in artista.split(" / ") if parte.strip()]
+    return [part.strip() for part in artist.split(" / ") if part.strip()]
 
 
-def tokens_de_artistas(artista):
-    """Palabras comparables de TODOS los artistas del crédito, para
-    el chequeo de "¿el artista aparece en el video?"."""
+def artist_tokens(artist):
+    """Comparable words from ALL artists in the credit, for checking
+    'does the artist appear in the video?'."""
     tokens = set()
-    for parte in separar_artistas(artista):
-        tokens |= palabras(parte)
+    for part in split_artists(artist):
+        tokens |= words(part)
     return tokens
 
 
-def armar_consultas(artista, titulo, catno):
-    """Las búsquedas a probar para un track: una por cada artista del
-    crédito y, si el vinilo tiene número de catálogo, una más con él
-    ("SEMID026 R U Listening..."): los sellos chicos suelen titular
-    sus subidas por catálogo y no por artista."""
-    consultas = [f"{parte} {titulo}" for parte in separar_artistas(artista)] or [titulo]
+def build_queries(artist, title, catno):
+    """The searches to try for a track: one for each artist in the credit
+    and, if the vinyl has a catalog number, one more with it
+    ("SEMID026 R U Listening..."): small labels usually title their uploads
+    by catalog number, not artist."""
+    queries = [f"{part} {title}" for part in split_artists(artist)] or [title]
     if catno:
-        consultas.append(f"{catno} {titulo}")
-    return consultas
+        queries.append(f"{catno} {title}")
+    return queries
 
 
-# Señales de que el video no es UN track sino el EP entero o un
-# preview del sello ("R U Listening EP inc Sweely Remix", 8:34).
-# Pasan el chequeo de título y artista y solo la duración los delata;
-# por eso el rescate (que afloja la duración) los excluye: un minimix
-# mezcla varios tempos y mediría cualquier cosa.
-PALABRAS_COMPILADO = {"ep", "lp", "va", "inc", "incl", "minimix", "megamix",
-                      "preview", "previews", "snippet", "snippets",
-                      "sampler", "showreel", "teaser"}
+# Signs that the video is not ONE track but the whole EP or a label
+# preview ("R U Listening EP inc Sweely Remix", 8:34).
+# They pass the title and artist checks and only duration reveals them;
+# that's why rescue (which loosens duration) excludes them: a mini-mix
+# blends multiple tempos and would measure anything.
+COMPILATION_WORDS = {"ep", "lp", "va", "inc", "incl", "minimix", "megamix",
+                     "preview", "previews", "snippet", "snippets",
+                     "sampler", "showreel", "teaser"}
 
 
-def parece_compilado(titulo_video):
-    limpio = "".join(c.lower() if c.isalnum() else " " for c in titulo_video)
-    return bool(set(limpio.split()) & PALABRAS_COMPILADO)
+def seems_compilation(video_title):
+    clean = "".join(c.lower() if c.isalnum() else " " for c in video_title)
+    return bool(set(clean.split()) & COMPILATION_WORDS)
 
 
-# Umbral de la comparación letra por letra (ver similitud_parcial):
-# a partir de acá lo tratamos como "mismo título".
-UMBRAL_FUZZY = 0.75
+# Threshold for character-by-character comparison (see partial_similarity):
+# above this we treat it as "same title".
+FUZZY_THRESHOLD = 0.75
 
 
-def compacto(texto):
-    """Deja solo letras y números en minúscula, sin espacios ni
-    puntuación — para comparar "Snap-Shot" con "Snapshot" o "Sugar
-    Coated" con "Sugarcoated" como si fueran el mismo texto."""
-    return "".join(c.lower() for c in texto if c.isalnum())
+def compact(text):
+    """Leaves only lowercase letters and numbers, no spaces or punctuation —
+    to compare "Snap-Shot" with "Snapshot" or "Sugar Coated" with "Sugarcoated"
+    as the same text."""
+    return "".join(c.lower() for c in text if c.isalnum())
 
 
-def similitud_parcial(a, b):
-    """Qué tan bien encaja el más corto de los dos textos DENTRO del
-    más largo, letra por letra. A diferencia de comparar las dos
-    cadenas de punta a punta, esto no castiga que el candidato traiga
-    decoración de más (nombre de sello, artista, etc.)."""
-    a, b = compacto(a), compacto(b)
+def partial_similarity(a, b):
+    """How well the shorter of the two texts fits INSIDE the longer one,
+    character by character. Unlike comparing the two strings end-to-end,
+    this doesn't penalize the candidate bringing extra decoration
+    (label name, artist, etc.)."""
+    a, b = compact(a), compact(b)
     if not a or not b:
         return 0.0
-    corto, largo = (a, b) if len(a) <= len(b) else (b, a)
-    mejor = 0.0
-    for i in range(len(largo) - len(corto) + 1):
-        mejor = max(mejor, difflib.SequenceMatcher(None, corto, largo[i:i + len(corto)]).ratio())
-        if mejor == 1.0:
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    best = 0.0
+    for i in range(len(long) - len(short) + 1):
+        best = max(best, difflib.SequenceMatcher(None, short, long[i:i + len(short)]).ratio())
+        if best == 1.0:
             break
-    return mejor
+    return best
 
 
-def titulo_coincide(titulo_track, titulo_candidato):
-    """True si el candidato parece ser el mismo tema: comparte la
-    mitad de las palabras con el de Discogs (chequeo normal), o —
-    cuando lo escriben distinto, con guion, sin espacio, o con una
-    letra de más o de menos, como pasa seguido en Bandcamp— el texto
-    es lo bastante parecido letra por letra."""
-    objetivo = palabras(titulo_track)
-    del_candidato = palabras(titulo_candidato)
-    if objetivo and len(objetivo & del_candidato) / len(objetivo) >= 0.5:
+def title_matches(track_title, candidate_title):
+    """True if the candidate seems to be the same song: shares half the words
+    with the Discogs one (normal check), or — when written differently, hyphenated,
+    without space, or with one extra/missing letter, as often happens on Bandcamp —
+    the text is similar enough character by character."""
+    target = words(track_title)
+    candidate_words = words(candidate_title)
+    if target and len(target & candidate_words) / len(target) >= 0.5:
         return True
-    return similitud_parcial(titulo_track, titulo_candidato) >= UMBRAL_FUZZY
+    return partial_similarity(track_title, candidate_title) >= FUZZY_THRESHOLD
 
 
-def elegir_videos(candidatos, artista, titulo_track, duracion_objetivo):
-    """Separa los resultados de la búsqueda en dos listas y devuelve
-    (aprobados, rescate), las dos ordenadas del que mejor pega en
-    duración al peor. Los aprobados pasan los tres chequeos; los de
-    rescate pegan en título y artista pero NO en duración, y sirven
-    como último recurso (ver el rescate en analizar_track). Son
-    listas y no un solo video para que, si la descarga del mejor
-    falla — SoundCloud sirve algunos tracks con DRM —, se pueda
-    probar el siguiente.
+def select_videos(candidates, artist, track_title, target_duration):
+    """Separates search results into two lists and returns (approved, rescue),
+    both sorted from best to worst duration match. Approved ones pass all three
+    checks; rescue ones match title and artist but NOT duration, serving as
+    a last resort (see rescue in analyze_track). They're lists not single videos
+    so if the best one fails to download — SoundCloud serves some tracks with
+    DRM — the next one can be tried.
 
-    Tres chequeos, porque cada uno solo se equivoca:
-      - el título del video tiene que ser (o parecerse mucho a) el
-        título del track (si no, en un EP el buscador te da otro
-        tema del mismo artista que dura parecido),
-      - el artista tiene que aparecer en el título del video o en el
-        canal que lo subió (si no, "Free The Drums" matchea con
-        cualquier video que diga "FREE DOWNLOAD ... drums"), y
-      - la duración tiene que coincidir con la de Discogs (si la hay);
-        si no, entre "Tema X" y "Tema X (Remix)" agarra cualquiera.
+    Three checks, because each one alone can fail:
+      - the video title must be (or closely match) the track title (otherwise,
+        in an EP the search gives you another song by the same artist with
+        similar duration),
+      - the artist must appear in the video title or the channel that uploaded it
+        (otherwise, "Free The Drums" matches any video saying "FREE DOWNLOAD ... drums"),
+        and
+      - the duration must match Discogs' (if available); if not, it picks any of
+        "Song X" vs "Song X (Remix)".
     """
-    tokens_artista = tokens_de_artistas(artista)
+    tokens = artist_tokens(artist)
 
-    aprobados = []
-    rescate = []
-    for video in candidatos:
+    approved = []
+    rescue = []
+    for video in candidates:
         dur = video.get("duration")
         if not dur:
             continue
 
-        titulo_video = video.get("title", "")
-        if not titulo_coincide(titulo_track, titulo_video):
+        video_title = video.get("title", "")
+        if not title_matches(track_title, video_title):
             continue
 
-        canal = video.get("uploader") or video.get("channel") or ""
-        if tokens_artista and not tokens_artista & (palabras(titulo_video) | palabras(canal)):
+        channel = video.get("uploader") or video.get("channel") or ""
+        if tokens and not tokens & (words(video_title) | words(channel)):
             continue
 
-        if duracion_objetivo:
-            tolerancia = max(TOLERANCIA_SEG, duracion_objetivo * TOLERANCIA_PORCENTAJE)
-            diferencia = abs(dur - duracion_objetivo)
-            if diferencia <= tolerancia:
-                aprobados.append((diferencia, video))
-            elif 120 <= dur <= 900 and not parece_compilado(titulo_video):
-                rescate.append((diferencia, video))
+        if target_duration:
+            tolerance = max(TOLERANCE_SECONDS, target_duration * TOLERANCE_PERCENTAGE)
+            difference = abs(dur - target_duration)
+            if difference <= tolerance:
+                approved.append((difference, video))
+            elif 120 <= dur <= 900 and not seems_compilation(video_title):
+                rescue.append((difference, video))
         elif 120 <= dur <= 900:
-            aprobados.append((0, video))
-    aprobados.sort(key=lambda par: par[0])
-    rescate.sort(key=lambda par: par[0])
-    return [v for _, v in aprobados], [v for _, v in rescate]
+            approved.append((0, video))
+    approved.sort(key=lambda pair: pair[0])
+    rescue.sort(key=lambda pair: pair[0])
+    return [v for _, v in approved], [v for _, v in rescue]
 
 
-def buscar_bandcamp(artista, titulo, duracion_objetivo, catno=None):
-    """Busca el track en Bandcamp y devuelve (aprobados, rescate)
-    como elegir_videos, con dicts {title, url, duration, uploader}.
+def search_bandcamp(artist, title, target_duration, catno=None):
+    """Searches for the track on Bandcamp and returns (approved, rescue)
+    like select_videos, with dicts {title, url, duration, uploader}.
 
-    Bandcamp no tiene un modo "búsqueda" en yt-dlp, así que primero
-    le preguntamos a la API de autocompletado de bandcamp.com (la
-    misma que usa la lupa del sitio) por candidatos, filtramos por
-    título/artista igual que en elegir_videos, y recién a los que
-    matchean por texto les pedimos a yt-dlp la duración real (la
-    búsqueda de bandcamp.com no la incluye) para confirmar que es el
-    track correcto antes de bajar el audio.
+    Bandcamp doesn't have a "search" mode in yt-dlp, so we first query
+    bandcamp.com's autocomplete API (the same the site's search uses)
+    for candidates, filter by title/artist like in select_videos, and only
+    for those that match by text do we ask yt-dlp for real duration
+    (bandcamp.com search doesn't include it) to confirm it's the right track
+    before downloading audio.
     """
-    consultas = armar_consultas(artista, titulo, catno)
-    tokens_artista = tokens_de_artistas(artista)
+    queries = build_queries(artist, title, catno)
+    tokens = artist_tokens(artist)
 
-    candidatos = []
-    vistos = set()
-    for consulta in consultas:
+    candidates = []
+    seen = set()
+    for query in queries:
         try:
             resp = requests.post(
                 BANDCAMP_SEARCH_API,
                 json={
-                    "search_text": consulta,
+                    "search_text": query,
                     "search_filter": "track",
                     "full_page": False,
                     "fan_id": None,
@@ -298,27 +287,27 @@ def buscar_bandcamp(artista, titulo, duracion_objetivo, catno=None):
                 timeout=10,
             )
             resp.raise_for_status()
-            resultados = resp.json().get("auto", {}).get("results") or []
+            results = resp.json().get("auto", {}).get("results") or []
         except (requests.RequestException, ValueError):
             continue
 
-        for r in resultados:
+        for r in results:
             if r.get("type") != "t" or not r.get("item_url_path"):
                 continue
-            if r["item_url_path"] in vistos:
+            if r["item_url_path"] in seen:
                 continue
-            vistos.add(r["item_url_path"])
-            if not titulo_coincide(titulo, r.get("name", "")):
+            seen.add(r["item_url_path"])
+            if not title_matches(title, r.get("name", "")):
                 continue
-            if tokens_artista and not tokens_artista & palabras(r.get("band_name", "")):
+            if tokens and not tokens & words(r.get("band_name", "")):
                 continue
-            candidatos.append(r)
+            candidates.append(r)
 
-    rescate = []
-    for candidato in candidatos[:3]:
-        url = candidato["item_url_path"]
+    rescue = []
+    for candidate in candidates[:3]:
+        url = candidate["item_url_path"]
         try:
-            with YoutubeDL(opciones_base()) as ydl:
+            with YoutubeDL(base_options()) as ydl:
                 info = ydl.extract_info(url, download=False)
         except Exception:
             continue
@@ -327,66 +316,65 @@ def buscar_bandcamp(artista, titulo, duracion_objetivo, catno=None):
         if not dur:
             continue
         video = {
-            "title": info.get("title") or f"{candidato.get('band_name', '')} - {candidato.get('name', '')}",
+            "title": info.get("title") or f"{candidate.get('band_name', '')} - {candidate.get('name', '')}",
             "url": url,
             "duration": dur,
-            "uploader": candidato.get("band_name", ""),
+            "uploader": candidate.get("band_name", ""),
         }
-        if duracion_objetivo:
-            tolerancia = max(TOLERANCIA_SEG, duracion_objetivo * TOLERANCIA_PORCENTAJE)
-            if abs(dur - duracion_objetivo) <= tolerancia:
-                return [video], rescate  # con uno que pasa todo alcanza
-            if 120 <= dur <= 900 and not parece_compilado(video["title"]):
-                rescate.append(video)
+        if target_duration:
+            tolerance = max(TOLERANCE_SECONDS, target_duration * TOLERANCE_PERCENTAGE)
+            if abs(dur - target_duration) <= tolerance:
+                return [video], rescue  # one that passes everything is enough
+            if 120 <= dur <= 900 and not seems_compilation(video["title"]):
+                rescue.append(video)
         elif 120 <= dur <= 900:
-            return [video], rescate
-    return [], rescate
+            return [video], rescue
+    return [], rescue
 
 
-# El modelo de deeprhythm tarda unos segundos en cargar (y la primera
-# vez baja sus pesos de internet), así que lo cargamos una sola vez,
-# recién cuando hace falta.
-_modelo_deeprhythm = None
+# The deeprhythm model takes a few seconds to load (and the first time
+# downloads its weights from the internet), so we load it just once,
+# only when needed.
+_deeprhythm_model = None
 
 
-def modelo_deeprhythm():
-    global _modelo_deeprhythm
-    if _modelo_deeprhythm is None:
+def deeprhythm_model():
+    global _deeprhythm_model
+    if _deeprhythm_model is None:
         from deeprhythm import DeepRhythmPredictor
-        _modelo_deeprhythm = DeepRhythmPredictor()
-    return _modelo_deeprhythm
+        _deeprhythm_model = DeepRhythmPredictor()
+    return _deeprhythm_model
 
 
-def medir_bpm(ruta_audio, duracion_video):
-    """Recorta un pedazo del medio del track (donde ya entró el beat),
-    lo convierte a WAV y mide el tempo con los dos detectores.
+def measure_bpm(audio_path, video_duration):
+    """Cuts a piece from the middle of the track (where the beat has come in),
+    converts it to WAV, and measures tempo with both detectors.
 
-    Devuelve (bpm, alternativa, dudoso):
-      - detectores de acuerdo:    (bpm, None, False) — número confiable
-        (igual lo validás vos en edit_bpm.py, nada se valida solo),
-      - detectores en desacuerdo: (deeprhythm, librosa, True) —
-        se guarda el primero, marcado para confirmar en edit_bpm.py,
-      - midió uno solo:           (ese bpm, None, True si fue librosa),
-      - no se pudo medir nada:    (None, None, False).
+    Returns (bpm, alternative, doubtful):
+      - detectors agree:      (bpm, None, False) — reliable number
+        (you still validate it in edit_bpm.py, nothing validates itself),
+      - detectors disagree:   (deeprhythm, librosa, True) —
+        the first is saved, marked for confirmation in edit_bpm.py,
+      - only one measured:    (that bpm, None, True if librosa),
+      - couldn't measure any: (None, None, False).
 
-    ¿Por qué dos detectores? Porque librosa solo a veces se engancha
-    a un pulso que no es (mide 89 en un track de 134: un error de
-    2/3 que ningún ajuste de rango puede corregir). deeprhythm es
-    mucho más preciso en música electrónica, y la coincidencia entre
-    ambos es lo que nos dice si el número es de fiar.
+    Why two detectors? Because librosa sometimes locks onto a beat it shouldn't
+    (measures 89 on a 134 BPM track: a 2/3 error no range adjustment can fix).
+    deeprhythm is much more precise on electronic music, and agreement between
+    both tells us if the number is trustworthy.
     """
-    wav = ruta_audio.with_suffix(".wav")
-    inicio = min(60, int(duracion_video // 3)) if duracion_video else 30
+    wav = audio_path.with_suffix(".wav")
+    start = min(60, int(video_duration // 3)) if video_duration else 30
     subprocess.run(
         [FFMPEG, "-y", "-loglevel", "error",
-         "-ss", str(inicio), "-i", str(ruta_audio),
+         "-ss", str(start), "-i", str(audio_path),
          "-t", "60", "-ac", "1", "-ar", "22050", str(wav)],
         check=True,
     )
 
-    # Detector 1: deeprhythm (ojo: necesita el WAV, no lee webm/m4a).
+    # Detector 1: deeprhythm (note: needs WAV, doesn't read webm/m4a).
     try:
-        bpm_dr = acomodar_al_rango(float(modelo_deeprhythm().predict(str(wav))))
+        bpm_dr = acomodar_al_rango(float(deeprhythm_model().predict(str(wav))))
     except Exception:
         bpm_dr = None
 
@@ -398,21 +386,21 @@ def medir_bpm(ruta_audio, duracion_video):
     if bpm_dr is None and bpm_lr is None:
         return None, None, False
     if bpm_lr is None:
-        return bpm_dr, None, False   # deeprhythm solo: confiable
+        return bpm_dr, None, False   # deeprhythm alone: reliable
     if bpm_dr is None:
-        return bpm_lr, None, True    # librosa solo: mejor confirmarlo
-    if abs(bpm_dr - bpm_lr) <= TOLERANCIA_BPM:
-        return bpm_dr, None, False   # dos detectores de acuerdo
+        return bpm_lr, None, True    # librosa alone: better to confirm
+    if abs(bpm_dr - bpm_lr) <= TOLERANCE_BPM:
+        return bpm_dr, None, False   # two detectors agree
     return bpm_dr, bpm_lr, True
 
 
-def bajar_y_medir(video, tmpdir):
-    """Baja el audio del video a tmpdir, mide el tempo y borra el
-    archivo. Devuelve lo mismo que medir_bpm. Si la descarga falla
-    (p. ej. SoundCloud sirviendo el track con DRM), deja subir la
-    excepción para que el que llama pruebe otro candidato."""
-    ops_descarga = opciones_base()
-    ops_descarga.update(
+def download_and_measure(video, tmpdir):
+    """Downloads the video's audio to tmpdir, measures tempo, and deletes the
+    file. Returns the same as measure_bpm. If download fails (e.g., SoundCloud
+    serving the track with DRM), lets the exception bubble up so the caller
+    can try another candidate."""
+    download_opts = base_options()
+    download_opts.update(
         {
             "noprogress": True,
             "format": "bestaudio/best",
@@ -420,100 +408,98 @@ def bajar_y_medir(video, tmpdir):
         }
     )
     try:
-        with YoutubeDL(ops_descarga) as ydl:
+        with YoutubeDL(download_opts) as ydl:
             info = ydl.extract_info(video["url"], download=True)
-            ruta_audio = Path(ydl.prepare_filename(info))
-        return medir_bpm(ruta_audio, video.get("duration"))
+            audio_path = Path(ydl.prepare_filename(info))
+        return measure_bpm(audio_path, video.get("duration"))
     finally:
-        # borramos el audio apenas lo medimos (o lo que haya quedado
-        # de una descarga fallida)
-        for archivo in Path(tmpdir).iterdir():
-            archivo.unlink()
+        # delete the audio as soon as we measure it (or what's left
+        # of a failed download)
+        for file in Path(tmpdir).iterdir():
+            file.unlink()
 
 
-def analizar_track(artista, titulo, duracion_objetivo, tmpdir, catno=None):
-    """Busca el track (Bandcamp primero, YouTube y SoundCloud si no),
-    baja el mejor candidato y devuelve (bpm, alternativa, dudoso,
-    detalle). Si ningún candidato pasa el filtro de duración pero
-    alguno clava título y artista, lo mide igual como último recurso
-    (ver la pasada de rescate abajo). Si no se pudo nada, bpm viene
-    None y detalle explica el motivo."""
-    consultas = armar_consultas(artista, titulo, catno)
+def analyze_track(artist, title, target_duration, tmpdir, catno=None):
+    """Searches for the track (Bandcamp first, YouTube and SoundCloud if not),
+    downloads the best candidate, and returns (bpm, alternative, doubtful, detail).
+    If no candidate passes the duration filter but one matches title and artist,
+    it measures it anyway as a last resort (see rescue pass below).
+    If nothing works, bpm is None and detail explains why."""
+    queries = build_queries(artist, title, catno)
 
-    motivos = []
-    rescates = []  # (buscador, video) que pegan en todo menos en duración
-    for nombre, prefijo in [("Bandcamp", None)] + BUSCADORES:
+    reasons = []
+    rescues = []  # (searcher, video) matching everything except duration
+    for name, prefix in [("Bandcamp", None)] + SEARCHERS:
         try:
-            if prefijo is None:
-                videos, rescate = buscar_bandcamp(artista, titulo, duracion_objetivo, catno)
+            if prefix is None:
+                videos, rescue = search_bandcamp(artist, title, target_duration, catno)
             else:
-                ops_busqueda = opciones_base()
-                ops_busqueda["extract_flat"] = "in_playlist"
-                candidatos = []
-                vistos = set()
-                with YoutubeDL(ops_busqueda) as ydl:
-                    for consulta in consultas:
-                        busqueda = ydl.extract_info(f"{prefijo}:{consulta}", download=False)
-                        for entrada in busqueda.get("entries") or []:
-                            clave = entrada.get("url") or entrada.get("id")
-                            if clave in vistos:
+                search_opts = base_options()
+                search_opts["extract_flat"] = "in_playlist"
+                candidates = []
+                seen = set()
+                with YoutubeDL(search_opts) as ydl:
+                    for query in queries:
+                        search = ydl.extract_info(f"{prefix}:{query}", download=False)
+                        for entry in search.get("entries") or []:
+                            key = entry.get("url") or entry.get("id")
+                            if key in seen:
                                 continue
-                            vistos.add(clave)
-                            candidatos.append(entrada)
-                videos, rescate = elegir_videos(candidatos, artista, titulo, duracion_objetivo)
+                            seen.add(key)
+                            candidates.append(entry)
+                videos, rescue = select_videos(candidates, artist, title, target_duration)
         except Exception as e:
-            motivos.append(f"{nombre}: {resumir_error(e)}")
+            reasons.append(f"{name}: {summarize_error(e)}")
             continue
 
-        rescates.extend((nombre, video) for video in rescate)
+        rescues.extend((name, video) for video in rescue)
         if not videos:
-            motivos.append(f"{nombre}: sin resultado que coincida en artista, título y duración")
+            reasons.append(f"{name}: no result matching artist, title, and duration")
             continue
 
-        # Si la descarga del mejor candidato falla (típico: SoundCloud
-        # lo sirve con DRM), probamos los siguientes: muchas veces hay
-        # otra subida del mismo tema que sí se puede bajar.
+        # If the best candidate fails to download (typical: SoundCloud
+        # serves it with DRM), try the next ones: often there's another
+        # upload of the same song that does download.
         for video in videos[:3]:
             try:
-                bpm, alternativa, dudoso = bajar_y_medir(video, tmpdir)
+                bpm, alternative, doubtful = download_and_measure(video, tmpdir)
             except Exception as e:
-                motivos.append(f"{nombre}: {resumir_error(e)}")
+                reasons.append(f"{name}: {summarize_error(e)}")
                 continue
             if bpm is None:
-                motivos.append(f"{nombre}: no pude medir un tempo claro")
+                reasons.append(f"{name}: couldn't measure clear tempo")
                 continue
-            return bpm, alternativa, dudoso, f"{video.get('title', '')} [{nombre}]"
+            return bpm, alternative, doubtful, f"{video.get('title', '')} [{name}]"
 
-    # Pasada de rescate: nadie pasó el filtro completo, pero estos
-    # candidatos pegan en título y artista y solo fallan en duración.
-    # Casi siempre es otra edición del mismo tema (la versión de álbum
-    # vs. la del 12", o una duración mal cargada en Discogs), y el
-    # tempo no cambia entre ediciones. Eso sí: el resultado queda
-    # SIEMPRE dudoso, con las dos duraciones anotadas, para que la
-    # última palabra la tengas vos en el editor.
-    rescates.sort(key=lambda par: abs(par[1]["duration"] - duracion_objetivo))
-    for nombre, video in rescates[:2]:
+    # Rescue pass: no one passed the complete filter, but these candidates
+    # match title and artist and only fail on duration. It's almost always
+    # another edition of the same song (album version vs 12", or misEntered
+    # Discogs duration), and tempo doesn't change between editions. But the
+    # result is ALWAYS doubtful, with both durations noted, so you have
+    # the final say in the editor.
+    rescues.sort(key=lambda pair: abs(pair[1]["duration"] - target_duration))
+    for name, video in rescues[:2]:
         try:
-            bpm, alternativa, _ = bajar_y_medir(video, tmpdir)
+            bpm, alternative, _ = download_and_measure(video, tmpdir)
         except Exception as e:
-            motivos.append(f"{nombre}: {resumir_error(e)}")
+            reasons.append(f"{name}: {summarize_error(e)}")
             continue
         if bpm is None:
-            motivos.append(f"{nombre}: no pude medir un tempo claro")
+            reasons.append(f"{name}: couldn't measure clear tempo")
             continue
-        detalle = (f"{video.get('title', '')} [{nombre}; ojo: dura "
-                   f"{formatear_duracion(video['duration'])} y en Discogs figura "
-                   f"{formatear_duracion(duracion_objetivo)} — ¿otra edición?]")
-        return bpm, alternativa, True, detalle
+        detail = (f"{video.get('title', '')} [{name}; note: lasts "
+                  f"{formatear_duracion(video['duration'])} but Discogs says "
+                  f"{formatear_duracion(target_duration)} — different edition?]")
+        return bpm, alternative, True, detail
 
-    return None, None, False, " | ".join(motivos)
+    return None, None, False, " | ".join(reasons)
 
 
 def main():
-    limite = None
+    limit = None
     if len(sys.argv) > 1:
         try:
-            limite = int(sys.argv[1])
+            limit = int(sys.argv[1])
         except ValueError:
             print(__doc__)
             return
@@ -532,64 +518,64 @@ def main():
         ORDER BY releases.artist, releases.title, tracks.id
         """
     )
-    pendientes = cursor.fetchall()
-    if limite:
-        pendientes = pendientes[:limite]
+    pending = cursor.fetchall()
+    if limit:
+        pending = pending[:limit]
 
-    print(f"Tracks a analizar: {len(pendientes)}")
-    print("(esto baja el audio de YouTube y lo mide acá; tarda ~30s por track,")
-    print(" podés cortar con Ctrl+C y retomar después)\n")
+    print(f"Tracks to analyze: {len(pending)}")
+    print("(this downloads audio from YouTube and measures it here; takes ~30s per track,")
+    print(" you can stop with Ctrl+C and resume later)\n")
 
-    encontrados = 0
-    dudosos = 0
+    found = 0
+    doubtful = 0
     with tempfile.TemporaryDirectory() as tmpdir:
-        for i, row in enumerate(pendientes, start=1):
-            etiqueta = f"[{i}/{len(pendientes)}] {row['artist']} - {row['title']}"
+        for i, row in enumerate(pending, start=1):
+            label = f"[{i}/{len(pending)}] {row['artist']} - {row['title']}"
             try:
-                bpm, alternativa, dudoso, detalle = analizar_track(
+                bpm, alternative, doubt, detail = analyze_track(
                     row["artist"], row["title"],
                     parsear_duracion(row["duration_display"]), tmpdir,
                     row["catno"],
                 )
             except KeyboardInterrupt:
-                print("\nCortado. Lo analizado hasta acá quedó guardado.")
+                print("\nStopped. What was analyzed is saved.")
                 break
             except Exception as e:
-                print(f"{etiqueta}\n   -> error, sigo con el resto: {e}")
+                print(f"{label}\n   -> error, continuing: {e}")
                 continue
 
             if bpm:
                 cursor.execute(
                     "UPDATE tracks SET bpm = ?, bpm_source = 'youtube',"
                     " bpm_alt = ?, bpm_needs_review = ?, bpm_verified = 0 WHERE id = ?",
-                    (bpm, alternativa, int(dudoso), row["id"]),
+                    (bpm, alternative, int(doubt), row["id"]),
                 )
-                registrar_bpm_fuente(conn, row["id"], "youtube", bpm, detalle)
+                registrar_bpm_fuente(conn, row["id"], "youtube", bpm, detail)
                 conn.commit()
-                encontrados += 1
-                dudosos += int(dudoso)
-                if dudoso and alternativa:
-                    aviso = f"  [DUDOSO: el otro detector midió {alternativa:g}]"
-                elif dudoso:
-                    aviso = "  [DUDOSO: midió un solo detector]"
+                found += 1
+                doubtful += int(doubt)
+                if doubt and alternative:
+                    warning = f"  [DOUBTFUL: other detector measured {alternative:g}]"
+                elif doubt:
+                    warning = "  [DOUBTFUL: only one detector measured]"
                 else:
-                    aviso = ""
-                print(f"{etiqueta} -> {bpm:g} BPM{aviso}\n   (medido de: {detalle})")
+                    warning = ""
+                print(f"{label} -> {bpm:g} BPM{warning}\n   (measured from: {detail})")
             else:
-                print(f"{etiqueta}\n   -> {detalle}")
+                print(f"{label}\n   -> {detail}")
 
-            # Pausa entre tracks para no despertar al anti-bot de YouTube.
+            # Pause between tracks to not trigger YouTube's anti-bot.
             time.sleep(3)
 
     conn.close()
     print("\n" + "=" * 50)
-    print(f"BPM medido para {encontrados} de {len(pendientes)} tracks.")
-    if dudosos:
-        print(f"{dudosos} quedaron marcados como dudosos (los detectores no")
-        print("coincidieron), con el otro candidato a un click en el editor.")
+    print(f"BPM measured for {found} of {len(pending)} tracks.")
+    if doubtful:
+        print(f"{doubtful} were marked as doubtful (detectors didn't")
+        print("agree), with the other candidate one click away in the editor.")
     else:
-        print("Los dos detectores coincidieron en todos: buena señal.")
-    print("Falta tu parte: validalos en el editor: python edit_bpm.py")
+        print("Both detectors agreed on all: good sign.")
+    print("Your turn: validate them in the editor: python edit_bpm.py")
 
 
 if __name__ == "__main__":

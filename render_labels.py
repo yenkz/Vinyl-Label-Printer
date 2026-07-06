@@ -1,28 +1,26 @@
 """
-render_labels.py — PASO 4
+render_labels.py — STEP 4
 
-Genera UNA imagen por cada vinilo (no una por track), con la tapa
-del disco, el sello y la fecha de edición en el encabezado, y una
-tabla de todos sus tracks: posición, título, duración, BPM y
-tonalidad (key, en notación Camelot: "8A"). El ancho es siempre
-696px (los 62mm del rollo), y el alto varía según cuántos tracks
-tenga el disco.
+Generates ONE image per vinyl record (not one per track), with the cover,
+label, and release date in the header, and a table of all its tracks:
+position, title, duration, BPM, and tonality (key, in Camelot notation: "8A").
+The width is always 696px (the 62mm of the roll), and height varies based on
+how many tracks the record has.
 
-La tapa la baja fetch_discogs.py (paso 1), y si Discogs no la tuvo,
-los pasos de Bandcamp/Spotify; si un disco no la tiene, el
-encabezado sale solo con texto, como antes.
+The cover is downloaded by fetch_discogs.py (step 1), and if Discogs didn't
+have it, by Bandcamp/Spotify steps; if a record doesn't have one, the header
+comes out text-only, like before.
 
-El BPM y la key van en negrita porque son lo que vas a estar
-leyendo a oscuras en la cabina.
+BPM and key are in bold because that's what you'll be reading in the dark
+in the booth.
 
-Las imágenes quedan guardadas en la carpeta labels_output/, con
-nombres tipo "Artista - Disco (id).png", listas para que
-print_labels.py las mande a la impresora.
+Images are saved in the labels_output/ folder, with names like
+"Artist - Record (id).png", ready for print_labels.py to send to the printer.
 
-Cómo correrlo:
-    python render_labels.py              # genera TODAS las etiquetas
-    python render_labels.py aphex        # solo discos que contengan "aphex"
-    python render_labels.py aphex --ver  # además las abre en Vista Previa
+How to run it:
+    python render_labels.py              # generate ALL labels
+    python render_labels.py aphex        # only records containing "aphex"
+    python render_labels.py aphex --ver  # also open them in Preview
 """
 
 import re
@@ -38,46 +36,45 @@ from db import get_connection, init_db
 
 OUTPUT_DIR = Path(__file__).parent / config.OUTPUT_DIR
 
-# --- Medidas del diseño de la etiqueta (en píxeles, a 300dpi) ---
+# --- Label design measurements (in pixels, at 300dpi) ---
 MARGIN = 16
-LINEA_HEADER = 44   # alto de cada renglón del encabezado (artista / disco)
-LINEA_META = 32     # alto de los renglones chicos (sello / fecha)
-FILA_TITULOS = 30   # renglón con los nombres de las columnas (DUR/BPM/KEY)
+HEADER_LINE = 44   # height of each header row (artist / record)
+META_LINE = 32     # height of small rows (label / date)
+TITLES_ROW = 30    # row with column names (DUR/BPM/KEY)
 ROW_HEIGHT = 46
 FOOTER_MARGIN = 16
-COVER_PX = 170      # lado de la tapa en el encabezado
+COVER_PX = 170      # side of cover in header
 
 
-def cargar_fuentes():
-    """Intenta cargar la fuente configurada; si no existe en esta
-    computadora, usa la básica de Pillow (menos linda, pero funciona)."""
+def load_fonts():
+    """Tries to load the configured font; if it doesn't exist on this
+    computer, uses Pillow's default (less pretty, but it works)."""
     try:
-        negrita = ImageFont.truetype(config.FONT_PATH_BOLD, 34)
-        texto = ImageFont.truetype(config.FONT_PATH, 26)
-        bpm_negrita = ImageFont.truetype(config.FONT_PATH_BOLD, 26)
+        bold = ImageFont.truetype(config.FONT_PATH_BOLD, 34)
+        text = ImageFont.truetype(config.FONT_PATH, 26)
+        bpm_bold = ImageFont.truetype(config.FONT_PATH_BOLD, 26)
         meta = ImageFont.truetype(config.FONT_PATH, 22)
     except OSError:
-        print("Aviso: no encontré la fuente configurada en FONT_PATH, uso una básica.")
-        negrita = texto = bpm_negrita = meta = ImageFont.load_default()
-    return negrita, texto, bpm_negrita, meta
+        print("Warning: couldn't find configured font in FONT_PATH, using default.")
+        bold = text = bpm_bold = meta = ImageFont.load_default()
+    return bold, text, bpm_bold, meta
 
 
-def formatear_fecha(release):
-    """Fecha de edición del vinilo, limpia. Discogs a veces manda
-    "2005-00-00" cuando solo sabe el año; le sacamos los "-00". Si no
-    hay fecha, usamos el año solo."""
-    fecha = re.sub(r"(-00)+$", "", (release["released"] or "").strip())
-    return fecha or (str(release["year"]) if release["year"] else "")
+def format_date(release):
+    """Vinyl release date, clean. Discogs sometimes sends "2005-00-00" when
+    it only knows the year; we remove the "-00". If no date, use year only."""
+    date = re.sub(r"(-00)+$", "", (release["released"] or "").strip())
+    return date or (str(release["year"]) if release["year"] else "")
 
 
-def cargar_tapa(release):
-    """Abre la tapa que bajó enrich_spotify.py y la pasa a blanco y
-    negro puro con tramado — exactamente como la va a imprimir la
-    térmica, así lo que ves en pantalla es lo que sale en papel."""
+def load_cover(release):
+    """Opens the cover downloaded by enrich_spotify.py and converts it to
+    pure black and white with halftone — exactly how the thermal printer will
+    print it, so what you see on screen is what comes out on paper."""
     if not release["cover_path"]:
         return None
-    ruta = Path(__file__).parent / release["cover_path"]
-    if not ruta.exists():
+    path = Path(__file__).parent / release["cover_path"]
+    if not path.exists():
         return None
     try:
         tapa = Image.open(ruta).resize((COVER_PX, COVER_PX)).convert("L").convert("1")
@@ -86,17 +83,17 @@ def cargar_tapa(release):
     return tapa.convert("RGB")
 
 
-def truncar_texto(draw, texto, fuente, ancho_maximo):
-    """Corta el texto con '...' si no entra en el ancho disponible."""
-    if draw.textlength(texto, font=fuente) <= ancho_maximo:
-        return texto
-    while texto and draw.textlength(texto + "...", font=fuente) > ancho_maximo:
-        texto = texto[:-1]
-    return texto + "..."
+def truncate_text(draw, text, font, max_width):
+    """Cuts text with '...' if it doesn't fit in available width."""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    while text and draw.textlength(text + "...", font=font) > max_width:
+        text = text[:-1]
+    return text + "..."
 
 
-def nombre_de_archivo(release):
-    """Arma un nombre de archivo legible y válido, tipo
+def file_name(release):
+    """Creates a readable and valid file name, like
     "Aphex Twin - Selected Ambient Works (12345).png"."""
     base = f"{release['artist']} - {release['title']}"
     base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base).strip(" .")

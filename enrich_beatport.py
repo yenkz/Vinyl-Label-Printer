@@ -1,41 +1,36 @@
 """
-enrich_beatport.py — PASO 2
+enrich_beatport.py — STEP 2
 
-Busca TODOS los tracks en Beatport, LA referencia de metadatos de
-música electrónica (no solo los que están sin BPM: aunque un track ya
-tenga uno medido, el dato oficial de Beatport se consulta igual, sí o
-sí), y guarda lo que encuentra:
+Searches ALL tracks on Beatport, the metadata reference for electronic music
+(not just tracks without BPM: even if a track already has a measured BPM,
+Beatport's official data is consulted anyway), and saves what it finds:
 
-  - El BPM oficial (el de la ficha del track, cargado por el sello).
-    Queda anotado como fuente en bpm_sources, y pasa a ser el BPM
-    principal del track — salvo que vos ya hayas cargado o validado
-    uno a mano, que siempre gana.
-  - La tonalidad (key), que en la etiqueta sale en Camelot ("8A").
-  - El ISRC, si todavía no estaba.
+  - The official BPM (from the track's sheet, uploaded by the label).
+    It's noted as a source in bpm_sources and becomes the track's main BPM —
+    unless you've already entered or validated one manually, which always wins.
+  - The tonality (key), displayed on the label in Camelot notation ("8A").
+  - The ISRC, if not already present.
 
-Además cruza fuentes: si un track ya tenía BPM automático (de la
-medición de audio o de Deezer) y Beatport dice lo mismo, la duda
-queda resuelta — pero NADA se valida solo: la ✓ verde la ponés
-únicamente vos en el editor (python edit_bpm.py), donde ves todas
-las fuentes lado a lado. Si dicen distinto, el track queda marcado
-como dudoso, con el otro valor a un click.
+It also cross-references sources: if a track already had automatic BPM (from
+audio measurement or Deezer) and Beatport says the same, the question is
+resolved — but NOTHING validates itself: you put the green checkmark only
+in the editor (python edit_bpm.py), where you see all sources side by side.
+If they differ, the track is marked as doubtful, with the other value one click away.
 
-¿Cómo entra sin API key? Beatport no da acceso público a su API,
-pero su propio reproductor embebido (embed.beatport.com) usa un
-"cliente anónimo" cuyas credenciales son públicas: viajan en el
-JavaScript del reproductor a cualquier navegador. Este script hace
-lo mismo que el reproductor: pide un token anónimo con esas
-credenciales y consulta la API oficial (api.beatport.com/v4). Si
-Beatport rota las credenciales, se vuelven a sacar solas del
-JavaScript del embed.
+How does it work without an API key? Beatport doesn't give public API access,
+but its own embedded player (embed.beatport.com) uses an "anonymous client"
+whose credentials are public: they travel in the player's JavaScript to any
+browser. This script does the same as the player: it requests an anonymous token
+with those credentials and queries the official API (api.beatport.com/v4).
+If Beatport rotates the credentials, they're automatically extracted again from
+the embed's JavaScript.
 
-Para no traer datos de otro tema, el candidato tiene que coincidir
-en artista, en título (incluyendo el nombre del mix/remix) y en
-duración con lo que dice Discogs.
+For not importing tracks from different songs, the candidate must match the
+artist, title (including remix/mix name), and duration according to Discogs.
 
-Cómo correrlo:
-    python enrich_beatport.py        # todos los tracks pendientes
-    python enrich_beatport.py 5      # solo 5 (para probar)
+How to run it:
+    python enrich_beatport.py        # all pending tracks
+    python enrich_beatport.py 5      # only 5 (for testing)
 """
 
 import re
@@ -58,42 +53,41 @@ BEATPORT_API = "https://api.beatport.com/v4"
 BEATPORT_EMBED = "https://embed.beatport.com/"
 BEATPORT_TOKEN_URL = "https://account.beatport.com/o/token/"
 
-# Credenciales del cliente anónimo del reproductor embebido. Son
-# públicas por diseño (cualquier navegador las recibe al abrir un
-# embed de Beatport) y solo dan acceso de lectura anónima al catálogo.
-# Si dejan de andar, credenciales_posibles() saca las nuevas del
-# JavaScript del reproductor.
+# Credentials for the anonymous client of the embedded player. They're public
+# by design (any browser receives them when opening a Beatport embed) and only
+# provide anonymous read-only access to the catalog. If they stop working,
+# possible_credentials() extracts new ones from the player's JavaScript.
 CLIENT_ID = "2tiTbKxmQFwnbFjMONU4k7njMRZmV3ZMwRBndiZs"
 CLIENT_SECRET = (
     "RDUJyAk4zFEGtQ8rsTmylDSfxmALRNBn3D1BsRr7MKi3oa1TL9Mq9QxqUPK7loiu"
     "mXolEWbJcWa4IGAhtwnTz1cSXClGJ1tkkNCNWwRwjxIKTZJKOJxbwaNt0Rm3WG0v"
 )
 
-NAVEGADOR = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+BROWSER = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
-# Cuánto puede diferir la duración de Beatport de la de Discogs para
-# dar el track por correcto: 15 segundos o un 8%, lo que sea mayor
-# (las duraciones impresas en las fundas suelen estar redondeadas).
-TOLERANCIA_SEG = 15
-TOLERANCIA_PORCENTAJE = 0.08
+# How much Beatport's duration can differ from Discogs' to consider the track
+# correct: 15 seconds or 8%, whichever is larger (printed durations are often
+# rounded).
+TOLERANCE_SECONDS = 15
+TOLERANCE_PERCENTAGE = 0.08
 
-# Si el BPM que ya teníamos y el de Beatport difieren en menos que
-# esto, los damos por "de acuerdo" (mismo criterio que analyze_bpm).
-TOLERANCIA_BPM = 2.5
+# If the BPM we already had and Beatport's differ by less than this,
+# we consider them "in agreement" (same criterion as analyze_bpm).
+TOLERANCE_BPM = 2.5
 
-# El token anónimo dura 10 minutos; lo renovamos solo cuando expira.
-_token = {"valor": None, "vence": 0.0}
+# The anonymous token lasts 10 minutes; we renew it only when it expires.
+_token = {"value": None, "expires": 0.0}
 
 
-def credenciales_del_embed():
-    """Plan B: saca client_id/client_secret frescos del JavaScript del
-    reproductor embebido (por si Beatport rotó los conocidos)."""
+def credentials_from_embed():
+    """Plan B: extract fresh client_id/client_secret from the embedded player's
+    JavaScript (in case Beatport rotated the known ones)."""
     try:
-        pagina = requests.get(BEATPORT_EMBED, headers=NAVEGADOR, timeout=15).text
-        bundle = re.search(r'src="(/static/main\.[0-9a-f]+\.js)"', pagina)
+        page = requests.get(BEATPORT_EMBED, headers=BROWSER, timeout=15).text
+        bundle = re.search(r'src="(/static/main\.[0-9a-f]+\.js)"', page)
         if not bundle:
             return None
-        js = requests.get(BEATPORT_EMBED.rstrip("/") + bundle.group(1), headers=NAVEGADOR, timeout=20).text
+        js = requests.get(BEATPORT_EMBED.rstrip("/") + bundle.group(1), headers=BROWSER, timeout=20).text
     except requests.RequestException:
         return None
     client_id = re.search(r'client_id.{0,24}?"([A-Za-z0-9]{30,})"', js)
@@ -103,19 +97,19 @@ def credenciales_del_embed():
     return None
 
 
-def credenciales_posibles():
+def possible_credentials():
     yield CLIENT_ID, CLIENT_SECRET
-    frescas = credenciales_del_embed()
-    if frescas:
-        yield frescas
+    fresh = credentials_from_embed()
+    if fresh:
+        yield fresh
 
 
-def token_actual():
-    """Devuelve un token anónimo vigente, o None si Beatport no dio
-    ninguno (sin internet, o cambió el esquema del embed)."""
-    if _token["valor"] and time.time() < _token["vence"]:
-        return _token["valor"]
-    for client_id, client_secret in credenciales_posibles():
+def current_token():
+    """Returns a valid anonymous token, or None if Beatport didn't provide one
+    (no internet connection, or the embed scheme changed)."""
+    if _token["value"] and time.time() < _token["expires"]:
+        return _token["value"]
+    for client_id, client_secret in possible_credentials():
         try:
             resp = requests.post(
                 BEATPORT_TOKEN_URL,
@@ -130,86 +124,86 @@ def token_actual():
             continue
         if resp.status_code != 200:
             continue
-        datos = resp.json()
-        if datos.get("access_token"):
-            _token["valor"] = datos["access_token"]
-            # Renovamos un minuto antes de que venza, por las dudas.
-            _token["vence"] = time.time() + datos.get("expires_in", 600) - 60
-            return _token["valor"]
+        data = resp.json()
+        if data.get("access_token"):
+            _token["value"] = data["access_token"]
+            # Renew a minute before expiry, just in case.
+            _token["expires"] = time.time() + data.get("expires_in", 600) - 60
+            return _token["value"]
     return None
 
 
-def buscar_en_beatport(artista, titulo, duracion_objetivo):
-    """Busca el track en Beatport y devuelve el dict del track de la
-    API que realmente coincide (artista, título y duración), o None.
+def search_beatport(artist, title, target_duration):
+    """Searches for the track on Beatport and returns the API track dict that
+    truly matches (artist, title, and duration), or None.
 
-    Levanta RuntimeError si nos quedamos sin token (para cortar la
-    corrida en vez de imprimir "no encontrado" mil veces).
+    Raises RuntimeError if the token is unavailable (to stop the run instead of
+    printing "not found" a thousand times).
     """
-    token = token_actual()
+    token = current_token()
     if token is None:
-        raise RuntimeError("Beatport no renovó el token anónimo")
+        raise RuntimeError("Beatport did not renew the anonymous token")
 
-    # Beatport separa el nombre del mix ("Juaan Remix") del título;
-    # para la búsqueda usamos el título pelado y el mix lo chequeamos
-    # después contra los candidatos.
-    consulta = re.sub(r"\s*\([^)]*\)\s*$", "", titulo).strip() or titulo
-    es_various = not artista or artista.lower() in ("various", "desconocido")
-    params = {"name": consulta, "per_page": 20}
-    if not es_various:
-        params["artist_name"] = artista
+    # Beatport separates the remix name ("Juaan Remix") from the title;
+    # for the search we use the bare title and check the remix later
+    # against the candidates.
+    query = re.sub(r"\s*\([^)]*\)\s*$", "", title).strip() or title
+    is_various = not artist or artist.lower() in ("various", "unknown")
+    params = {"name": query, "per_page": 20}
+    if not is_various:
+        params["artist_name"] = artist
 
     try:
         resp = requests.get(
             f"{BEATPORT_API}/catalog/tracks/",
             params=params,
-            headers={"Authorization": f"Bearer {token}", **NAVEGADOR},
+            headers={"Authorization": f"Bearer {token}", **BROWSER},
             timeout=15,
         )
         if resp.status_code != 200:
             return None
-        resultados = resp.json().get("results") or []
+        results = resp.json().get("results") or []
     except (requests.RequestException, ValueError):
         return None
 
-    mejores = []
-    for track in resultados:
-        nombre = track.get("name") or ""
+    best = []
+    for track in results:
+        name = track.get("name") or ""
         mix = (track.get("mix_name") or "").strip()
-        # "Original Mix" no aporta nada; cualquier otro mix es parte
-        # del título ("Concrete Jungle (Juaan Remix)").
-        titulo_completo = nombre if mix.lower() in ("", "original mix", "original") else f"{nombre} ({mix})"
-        if not se_parecen(titulo_completo, titulo):
+        # "Original Mix" adds nothing; any other mix is part of the
+        # title ("Concrete Jungle (Juaan Remix)").
+        full_title = name if mix.lower() in ("", "original mix", "original") else f"{name} ({mix})"
+        if not se_parecen(full_title, title):
             continue
 
-        if not es_various:
-            nombres = [a.get("name", "") for a in track.get("artists") or []]
-            if not any(se_parecen(n, artista, umbral=0.8) for n in nombres):
+        if not is_various:
+            names = [a.get("name", "") for a in track.get("artists") or []]
+            if not any(se_parecen(n, artist, umbral=0.8) for n in names):
                 continue
 
-        duracion_track = (track.get("length_ms") or 0) / 1000
-        if duracion_objetivo and duracion_track:
-            tolerancia = max(TOLERANCIA_SEG, duracion_objetivo * TOLERANCIA_PORCENTAJE)
-            diferencia = abs(duracion_track - duracion_objetivo)
-            if diferencia > tolerancia:
+        track_duration = (track.get("length_ms") or 0) / 1000
+        if target_duration and track_duration:
+            tolerance = max(TOLERANCE_SECONDS, target_duration * TOLERANCE_PERCENTAGE)
+            difference = abs(track_duration - target_duration)
+            if difference > tolerance:
                 continue
-            mejores.append((diferencia, track))
-        elif normalizar(titulo_completo) == normalizar(titulo):
-            # Sin duración para comparar solo aceptamos el título
-            # calcado (si no, entre "Tema" y "Tema (Remix)" agarra
-            # cualquiera, y el remix tiene otro BPM y otra key).
-            mejores.append((9999, track))
+            best.append((difference, track))
+        elif normalizar(full_title) == normalizar(title):
+            # Without duration to compare, we only accept the exact title match
+            # (otherwise, "Song" vs "Song (Remix)" picks any, and the remix
+            # has different BPM and key).
+            best.append((9999, track))
 
-    if not mejores:
+    if not best:
         return None
-    return min(mejores, key=lambda par: par[0])[1]
+    return min(best, key=lambda pair: pair[0])[1]
 
 
 def main():
-    limite = None
+    limit = None
     if len(sys.argv) > 1:
         try:
-            limite = int(sys.argv[1])
+            limit = int(sys.argv[1])
         except ValueError:
             print(__doc__)
             return
@@ -217,11 +211,10 @@ def main():
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
-    # Beatport se consulta para TODOS los tracks, tengan BPM o no:
-    # es la fuente de referencia. Solo salteamos los que ya tienen
-    # anotada una respuesta de Beatport en bpm_sources (aunque haya
-    # sido "no está"), así las corridas siguientes van directo a lo
-    # que falta.
+    # Beatport is consulted for ALL tracks, whether they have BPM or not:
+    # it's the reference source. We only skip tracks that already have a
+    # Beatport response recorded in bpm_sources (even if it's "not found"),
+    # so subsequent runs go straight to what's missing.
     cursor.execute(
         """
         SELECT tracks.id, tracks.title, tracks.duration_display, tracks.bpm,
@@ -236,164 +229,164 @@ def main():
         ORDER BY releases.artist, releases.title, tracks.id
         """
     )
-    pendientes = cursor.fetchall()
-    if limite:
-        pendientes = pendientes[:limite]
+    pending = cursor.fetchall()
+    if limit:
+        pending = pending[:limit]
 
-    print(f"Tracks a consultar en Beatport: {len(pendientes)}\n")
-    print("Conectando con Beatport (token anónimo del reproductor embebido)...")
-    if token_actual() is None:
+    print(f"Tracks to check on Beatport: {len(pending)}\n")
+    print("Connecting to Beatport (anonymous token from embedded player)...")
+    if current_token() is None:
         print(
-            "No pude conseguir el token anónimo de Beatport.\n"
-            "Puede ser un problema de conexión, o que Beatport cambió su\n"
-            "reproductor embebido. Probá de nuevo más tarde; mientras tanto\n"
-            "el resto del flujo sigue andando (enrich_bpm.py, analyze_bpm.py)."
+            "Could not get Beatport's anonymous token.\n"
+            "It might be a connection issue, or Beatport changed its\n"
+            "embedded player. Try again later; in the meantime\n"
+            "the rest of the workflow still works (enrich_bpm.py, analyze_bpm.py)."
         )
         return
-    print("Conectado.\n")
+    print("Connected.\n")
 
-    stats = {"bpm": 0, "keys": 0, "coinciden": 0, "dudosos": 0, "isrc": 0}
-    for i, row in enumerate(pendientes, start=1):
-        # Si el disco tiene varios artistas los guardamos como
-        # "Artista 1 / Artista 2"; para buscar usamos solo el primero.
-        artista = row["artist"].split(" / ")[0]
-        etiqueta = f"[{i}/{len(pendientes)}] {row['artist']} - {row['title']}"
+    stats = {"bpm": 0, "keys": 0, "match": 0, "doubtful": 0, "isrc": 0}
+    for i, row in enumerate(pending, start=1):
+        # If the record has multiple artists we store them as
+        # "Artist 1 / Artist 2"; for searching we use only the first one.
+        artist = row["artist"].split(" / ")[0]
+        label = f"[{i}/{len(pending)}] {row['artist']} - {row['title']}"
 
         try:
-            candidato = buscar_en_beatport(
-                artista, row["title"], parsear_duracion(row["duration_display"])
+            candidate = search_beatport(
+                artist, row["title"], parsear_duracion(row["duration_display"])
             )
         except RuntimeError as e:
-            print(f"\nCorto acá: {e}. Lo guardado hasta ahora no se pierde.")
+            print(f"\nStopping here: {e}. What was saved so far is preserved.")
             break
 
-        if not candidato:
-            # Anotamos que Beatport no lo tuvo (bpm en NULL), así la
-            # próxima corrida no vuelve a preguntar. Si algún día
-            # aparece en Beatport, borrá esa fila y volvé a correr.
+        if not candidate:
+            # We note that Beatport didn't have it (bpm is NULL), so the
+            # next run won't ask again. If it appears on Beatport someday,
+            # delete that row and run again.
             cursor.execute(
                 "INSERT OR IGNORE INTO bpm_sources (track_id, source, bpm) VALUES (?, 'beatport', NULL)",
                 (row["id"],),
             )
             conn.commit()
-            print(f"{etiqueta} (no está en Beatport)")
+            print(f"{label} (not on Beatport)")
             time.sleep(0.6)
             continue
 
-        novedades = []
+        updates = []
 
-        mix = (candidato.get("mix_name") or "").strip()
-        detalle = candidato.get("name") or ""
+        mix = (candidate.get("mix_name") or "").strip()
+        detail = candidate.get("name") or ""
         if mix:
-            detalle = f"{detalle} ({mix})"
+            detail = f"{detail} ({mix})"
 
-        bpm_ficha = candidato.get("bpm")
-        if bpm_ficha:
-            # La ficha de Beatport a veces trae el tempo a la mitad
-            # (67 en un track de 134): lo acomodamos al rango de tu
-            # colección, dejando el número original anotado.
-            bpm_ficha = float(bpm_ficha)
-            bpm_beatport = acomodar_al_rango(bpm_ficha)
-            if bpm_beatport != bpm_ficha:
-                detalle = f"{detalle} (la ficha dice {bpm_ficha:g} BPM)"
-            registrar_bpm_fuente(conn, row["id"], "beatport", bpm_beatport, detalle)
+        card_bpm = candidate.get("bpm")
+        if card_bpm:
+            # The Beatport sheet sometimes has the tempo at half speed
+            # (67 for a 134 BPM track): we adjust it to your collection's
+            # range, keeping the original number noted.
+            card_bpm = float(card_bpm)
+            beatport_bpm = acomodar_al_rango(card_bpm)
+            if beatport_bpm != card_bpm:
+                detail = f"{detail} (sheet says {card_bpm:g} BPM)"
+            registrar_bpm_fuente(conn, row["id"], "beatport", beatport_bpm, detail)
             if row["bpm"] is None:
-                # Sin BPM previo: el de Beatport queda como principal,
-                # pero SIN validar — la ✓ la ponés vos en el editor.
+                # No previous BPM: Beatport's becomes the main one,
+                # but NOT validated — you put the checkmark in the editor.
                 cursor.execute(
                     "UPDATE tracks SET bpm = ?, bpm_source = 'beatport' WHERE id = ?",
-                    (bpm_beatport, row["id"]),
+                    (beatport_bpm, row["id"]),
                 )
                 stats["bpm"] += 1
-                novedades.append(f"{bpm_beatport:g} BPM")
+                updates.append(f"{beatport_bpm:g} BPM")
             elif row["bpm_source"] == "manual":
-                # Lo cargaste vos: no se toca. La cifra de Beatport
-                # queda visible como fuente en el editor.
-                novedades.append(f"Beatport dice {bpm_beatport:g} (queda el tuyo)")
-            elif abs(row["bpm"] - bpm_beatport) <= TOLERANCIA_BPM:
-                # Beatport está de acuerdo: adoptamos su cifra (es la
-                # oficial) y la duda queda resuelta, pero la validación
-                # sigue siendo tuya, con un click en el editor.
+                # You entered it: unchanged. Beatport's figure
+                # remains visible as a source in the editor.
+                updates.append(f"Beatport says {beatport_bpm:g} (keeping yours)")
+            elif abs(row["bpm"] - beatport_bpm) <= TOLERANCE_BPM:
+                # Beatport agrees: we adopt its figure (it's the official one)
+                # and the doubt is resolved, but validation remains yours,
+                # with one click in the editor.
                 if row["bpm_verified"]:
-                    novedades.append("Beatport coincide con tu valor validado")
+                    updates.append("Beatport matches your validated value")
                 else:
                     cursor.execute(
                         "UPDATE tracks SET bpm = ?, bpm_source = 'beatport',"
                         " bpm_alt = NULL, bpm_needs_review = 0 WHERE id = ?",
-                        (bpm_beatport, row["id"]),
+                        (beatport_bpm, row["id"]),
                     )
-                    stats["coinciden"] += 1
-                    novedades.append("Beatport coincide (confirmalo en el editor)")
+                    stats["match"] += 1
+                    updates.append("Beatport matches (confirm in editor)")
             elif row["bpm_verified"]:
-                # Ya lo habías validado y Beatport dice otra cosa: no
-                # pisamos tu valor, pero reabrimos la duda para que lo
-                # mires con las dos cifras a la vista.
+                # You had already validated it and Beatport says something else:
+                # we don't overwrite your value, but reopen the doubt so you
+                # look at it with both figures in sight.
                 cursor.execute(
                     "UPDATE tracks SET bpm_alt = ?, bpm_needs_review = 1,"
                     " bpm_verified = 0 WHERE id = ?",
-                    (bpm_beatport, row["id"]),
+                    (beatport_bpm, row["id"]),
                 )
-                stats["dudosos"] += 1
-                novedades.append(
-                    f"ojo: estaba validado en {row['bpm']:g} pero Beatport dice {bpm_beatport:g}"
+                stats["doubtful"] += 1
+                updates.append(
+                    f"warning: was validated at {row['bpm']:g} but Beatport says {beatport_bpm:g}"
                 )
             else:
-                # Difieren y el valor previo era automático: gana la
-                # cifra oficial de Beatport, la otra queda a un click.
+                # They differ and the previous value was automatic: Beatport's
+                # official figure wins, the other stays one click away.
                 cursor.execute(
                     "UPDATE tracks SET bpm = ?, bpm_source = 'beatport',"
                     " bpm_alt = ?, bpm_needs_review = 1 WHERE id = ?",
-                    (bpm_beatport, row["bpm"], row["id"]),
+                    (beatport_bpm, row["bpm"], row["id"]),
                 )
-                stats["dudosos"] += 1
-                novedades.append(
-                    f"BPM dudoso (medido {row['bpm']:g}, Beatport dice {bpm_beatport:g})"
+                stats["doubtful"] += 1
+                updates.append(
+                    f"doubtful BPM (measured {row['bpm']:g}, Beatport says {beatport_bpm:g})"
                 )
         else:
-            # Está en Beatport pero sin BPM cargado: lo anotamos para
-            # no volver a preguntar.
+            # It's on Beatport but with no BPM set: we note it so we don't
+            # ask again.
             cursor.execute(
                 "INSERT OR IGNORE INTO bpm_sources (track_id, source, bpm, detail)"
                 " VALUES (?, 'beatport', NULL, ?)",
-                (row["id"], detalle),
+                (row["id"], detail),
             )
 
         if row["key"] is None:
-            key = normalizar_key((candidato.get("key") or {}).get("name"))
+            key = normalizar_key((candidate.get("key") or {}).get("name"))
             if key:
                 cursor.execute(
                     "UPDATE tracks SET key = ?, key_source = 'beatport' WHERE id = ?",
                     (key, row["id"]),
                 )
                 stats["keys"] += 1
-                novedades.append(f"key {key} ({a_camelot(key)})")
+                updates.append(f"key {key} ({a_camelot(key)})")
 
-        if not row["isrc"] and candidato.get("isrc"):
+        if not row["isrc"] and candidate.get("isrc"):
             cursor.execute(
                 "UPDATE tracks SET isrc = ? WHERE id = ?",
-                (candidato["isrc"], row["id"]),
+                (candidate["isrc"], row["id"]),
             )
             stats["isrc"] += 1
-            novedades.append("ISRC")
+            updates.append("ISRC")
 
         conn.commit()
-        print(f"{etiqueta} -> {', '.join(novedades) if novedades else 'sin novedades'}")
+        print(f"{label} -> {', '.join(updates) if updates else 'no updates'}")
 
-        # Vamos tranquilos, que la API es prestada.
+        # Take it easy, the API is borrowed.
         time.sleep(0.6)
 
     conn.close()
 
     print("\n" + "=" * 50)
     print(
-        f"Beatport: {stats['bpm']} BPM nuevos, {stats['keys']} keys, "
-        f"{stats['coinciden']} coinciden con lo medido, {stats['dudosos']} dudosos, "
-        f"{stats['isrc']} ISRC."
+        f"Beatport: {stats['bpm']} new BPMs, {stats['keys']} keys, "
+        f"{stats['match']} match the measured values, {stats['doubtful']} doubtful, "
+        f"{stats['isrc']} ISRCs."
     )
-    print("Recordá: nada queda validado solo — la ✓ la ponés vos en el editor.")
-    print("Próximo paso: python enrich_bandcamp.py  (tapas/duraciones que falten)")
-    print("           o: python analyze_bpm.py      (mide lo que Beatport no tuvo)")
-    print("           o: python edit_bpm.py         (validar BPMs, fuente por fuente)")
+    print("Remember: nothing validates itself — you put the checkmark in the editor.")
+    print("Next step: python enrich_bandcamp.py  (covers/durations that are missing)")
+    print("        or: python analyze_bpm.py      (measure what Beatport didn't have)")
+    print("        or: python edit_bpm.py         (validate BPMs, source by source)")
 
 
 if __name__ == "__main__":

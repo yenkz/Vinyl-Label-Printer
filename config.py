@@ -1,10 +1,9 @@
 """
-config.py — Ajustes técnicos del proyecto.
+config.py — Technical settings for the project.
 
-Acá NO va nada personal: tus tokens y tu usuario viven en el archivo
-.env (copiá .env.example como .env y completalo). Este archivo solo
-tiene la configuración de la impresora y de las etiquetas, que en
-general no hace falta tocar.
+No personal data here: your tokens and username live in the .env file
+(copy .env.example as .env and fill it in). This file only contains
+printer and label configuration, which you generally don't need to touch.
 """
 
 import os
@@ -12,74 +11,71 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Carga las variables del archivo .env que está junto a este archivo.
+# Load variables from the .env file in this directory.
 load_dotenv(Path(__file__).parent / ".env")
 
 # =========================================================
-# 1) DATOS PERSONALES (vienen del archivo .env)
+# 1) PERSONAL DATA (comes from the .env file)
 # =========================================================
 DISCOGS_USER_TOKEN = os.environ.get("DISCOGS_USER_TOKEN", "")
 DISCOGS_USERNAME = os.environ.get("DISCOGS_USERNAME", "")
 GETSONGBPM_API_KEY = os.environ.get("GETSONGBPM_API_KEY", "")
 
-# OPCIONAL. App de Spotify (https://developer.spotify.com/dashboard)
-# para enriquecer las etiquetas: tapa del disco, duraciones que le
-# falten a Discogs, e ISRC. Ojo: las apps nuevas de Spotify NO dan
-# acceso al BPM (audio-features está bloqueado desde nov 2024).
+# OPTIONAL. Spotify app (https://developer.spotify.com/dashboard)
+# to enrich labels: album cover, missing durations from Discogs, and ISRC.
+# Note: new Spotify apps do NOT have BPM access (audio-features blocked since Nov 2024).
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 
-# Identificador de tu "aplicación" ante Discogs. Podés dejarlo tal
-# cual, no requiere ningún registro.
+# Your "application" identifier with Discogs. You can leave it as is,
+# no registration required.
 DISCOGS_USER_AGENT = "VinylLabelPrinter/1.0"
 
 # =========================================================
-# 2) IMPRESORA (Brother QL series)
+# 2) PRINTER (Brother QL series)
 # =========================================================
-# Recomendada: QL-800 (más rápida y mejor soportada). Si en cambio
-# compraste una QL-600 / QL-600B, poné "QL-600" acá — también anda.
+# Recommended: QL-800 (faster and better supported). If you bought
+# a QL-600 / QL-600B instead, set "QL-600" here — it also works.
 PRINTER_MODEL = "QL-800"
 
-# Backend de conexión. Con USB casi siempre alcanza con "pyusb".
+# Connection backend. USB usually works fine with "pyusb".
 PRINTER_BACKEND = "pyusb"
 
-# Identificador exacto de la impresora. Dejalo en None para que
-# el script la busque solo entre los dispositivos USB conectados.
-# Si falla, corré en la terminal:
+# Exact printer identifier. Leave as None to have the script search
+# for it among connected USB devices. If it fails, run in the terminal:
 #   brother_ql discover
-# y pegá acá el string que te devuelva, algo como:
+# and paste the returned string here, something like:
 #   "usb://0x04f9:0x209b/000A1Z123456"
 PRINTER_IDENTIFIER = None
 
 # =========================================================
-# 3) ANÁLISIS DE BPM (analyze_bpm.py)
+# 3) BPM ANALYSIS (analyze_bpm.py)
 # =========================================================
-# Si YouTube se pone en modo "confirmá que no sos un robot" (pasa
-# cuando bajás muchos audios seguidos), el script pasa solo a buscar
-# en SoundCloud. Si además querés que YouTube vuelva a andar ya,
-# poné acá el navegador donde estés logueado en YouTube, para que
-# use tus cookies: "chrome", "safari", "firefox", "brave" o "edge".
-# (Con Safari, la Terminal puede pedir permiso de "Acceso total al
-# disco" en Ajustes del Sistema.)  Vacío = apagado.
+# If YouTube enters "confirm you're not a robot" mode (happens when
+# downloading many audio files in a row), the script automatically falls back
+# to SoundCloud. If you also want YouTube to work immediately, put here
+# the browser where you're logged into YouTube so it can use your cookies:
+# "chrome", "safari", "firefox", "brave" or "edge".
+# (With Safari, Terminal may ask for "Full Disk Access" in System Settings.)
+# Empty = disabled.
 YOUTUBE_COOKIES_NAVEGADOR = ""
 
 # =========================================================
-# 4) ETIQUETAS
+# 4) LABELS
 # =========================================================
-# Las Brother QL imprimen en rollo continuo de 62mm de ancho.
-# Esto NO se debe cambiar salvo que compres otro tipo de rollo.
+# Brother QL printers print on continuous 62mm wide rolls.
+# Do NOT change this unless you buy a different type of roll.
 LABEL_WIDTH_MM = 62
-LABEL_WIDTH_PX = 696  # ancho imprimible en píxeles a 300dpi (fijo)
+LABEL_WIDTH_PX = 696  # printable width in pixels at 300dpi (fixed)
 
-# Carpeta donde se van a guardar las imágenes generadas, listas
-# para imprimir.
+# Folder where generated images will be saved, ready to print.
 OUTPUT_DIR = "labels_output"
 
-# Carpeta donde se guardan las tapas bajadas (una por disco).
+# Folder where downloaded covers are saved (one per record).
 COVERS_DIR = "covers"
 
-# Fuente (tipografía) a usar en las etiquetas. Si no existe en tu
-# computadora, el script cae automáticamente a una fuente básica.
-# En Mac, una opción segura suele ser:
+# Font (typeface) to use on labels. If it doesn't exist on your
+# computer, the script automatically falls back to a basic font.
+# On Mac, a safe option is usually:
 FONT_PATH = "/System/Library/Fonts/Supplemental/Arial.ttf"
 FONT_PATH_BOLD = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"

@@ -1,30 +1,28 @@
 """
-edit_bpm.py — PASO 7: editor y validador de BPM y tonalidad
+edit_bpm.py — STEP 7: BPM and tonality editor and validator
 
-Levanta una pagina local (solo visible en tu computadora) con toda tu
-coleccion, para cargar o corregir BPMs y keys a mano sin andar
-exportando e importando CSVs: buscas el disco, haces click en el BPM
-(o en la key), escribis el valor y listo — se guarda solo en la base
-de datos.
+Launches a local page (only visible on your computer) with your entire
+collection, to load or correct BPMs and keys by hand without exporting and
+importing CSVs: find the record, click on the BPM (or key), type the value
+and done — it's saved directly to the database.
 
-Acá también se VALIDA: cada track muestra todas las fuentes de las
-que salió un BPM (beatport, la medición de youtube, deezer...) con su
-valor, lado a lado. Nada queda validado solo — la ✓ verde la ponés
-vos, siempre: con el botón ✓ (el valor actual está bien), o haciendo
-click en la píldora de una fuente (usás ese valor y lo validás en el
-mismo click).
+This is also where you VALIDATE: each track shows all the sources where
+a BPM came from (beatport, YouTube measurement, Deezer...) with its value,
+side by side. Nothing validates itself — you always put the green checkmark,
+either with the ✓ button (current value is correct) or by clicking on a
+source pill (use that value and validate it in the same click).
 
-La key se muestra en notación Camelot ("8A"), pero podés escribirla
-como quieras: "8A", "Am", "f# minor" — se guarda normalizada.
+The key is shown in Camelot notation ("8A"), but you can write it any way:
+"8A", "Am", "f# minor" — it's saved normalized.
 
-Cómo correrlo:
+How to run it:
     python edit_bpm.py
 
-Se abre solo en el navegador (http://localhost:8765). Para cerrarlo,
-volvé a la terminal y apretá Ctrl+C.
+It opens automatically in the browser (http://localhost:8765). To close it,
+go back to the terminal and press Ctrl+C.
 
-Los BPM y keys que cargues acá quedan como fuente 'manual' y ganan
-siempre: ni fetch_discogs ni los buscadores automáticos los pisan.
+BPMs and keys you enter here become source 'manual' and always win: neither
+fetch_discogs nor automatic searchers overwrite them.
 """
 
 import json
