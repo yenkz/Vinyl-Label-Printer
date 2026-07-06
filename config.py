@@ -22,6 +22,13 @@ DISCOGS_USER_TOKEN = os.environ.get("DISCOGS_USER_TOKEN", "")
 DISCOGS_USERNAME = os.environ.get("DISCOGS_USERNAME", "")
 GETSONGBPM_API_KEY = os.environ.get("GETSONGBPM_API_KEY", "")
 
+# OPCIONAL. App de Spotify (https://developer.spotify.com/dashboard)
+# para enriquecer las etiquetas: tapa del disco, duraciones que le
+# falten a Discogs, e ISRC. Ojo: las apps nuevas de Spotify NO dan
+# acceso al BPM (audio-features está bloqueado desde nov 2024).
+SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
+SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
+
 # Identificador de tu "aplicación" ante Discogs. Podés dejarlo tal
 # cual, no requiere ningún registro.
 DISCOGS_USER_AGENT = "VinylLabelPrinter/1.0"
@@ -45,7 +52,19 @@ PRINTER_BACKEND = "pyusb"
 PRINTER_IDENTIFIER = None
 
 # =========================================================
-# 3) ETIQUETAS
+# 3) ANÁLISIS DE BPM (analyze_bpm.py)
+# =========================================================
+# Si YouTube se pone en modo "confirmá que no sos un robot" (pasa
+# cuando bajás muchos audios seguidos), el script pasa solo a buscar
+# en SoundCloud. Si además querés que YouTube vuelva a andar ya,
+# poné acá el navegador donde estés logueado en YouTube, para que
+# use tus cookies: "chrome", "safari", "firefox", "brave" o "edge".
+# (Con Safari, la Terminal puede pedir permiso de "Acceso total al
+# disco" en Ajustes del Sistema.)  Vacío = apagado.
+YOUTUBE_COOKIES_NAVEGADOR = ""
+
+# =========================================================
+# 4) ETIQUETAS
 # =========================================================
 # Las Brother QL imprimen en rollo continuo de 62mm de ancho.
 # Esto NO se debe cambiar salvo que compres otro tipo de rollo.
@@ -55,6 +74,9 @@ LABEL_WIDTH_PX = 696  # ancho imprimible en píxeles a 300dpi (fijo)
 # Carpeta donde se van a guardar las imágenes generadas, listas
 # para imprimir.
 OUTPUT_DIR = "labels_output"
+
+# Carpeta donde se guardan las tapas bajadas (una por disco).
+COVERS_DIR = "covers"
 
 # Fuente (tipografía) a usar en las etiquetas. Si no existe en tu
 # computadora, el script cae automáticamente a una fuente básica.

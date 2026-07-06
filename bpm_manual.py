@@ -1,5 +1,5 @@
 """
-bpm_manual.py — PASO 3 (opcional pero recomendado)
+bpm_manual.py — PASO 7 alternativo (flujo por planilla CSV)
 
 Sirve para completar a mano los BPM que la búsqueda automática no
 encontró. Funciona en dos modos:
@@ -23,7 +23,7 @@ import csv
 import sys
 from pathlib import Path
 
-from db import get_connection, init_db
+from db import get_connection, init_db, registrar_bpm_fuente
 
 CSV_PATH = Path(__file__).parent / "bpm_pendientes.csv"
 
@@ -34,7 +34,8 @@ def export_csv():
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT tracks.id, releases.artist, releases.title AS album,
+        SELECT tracks.id, COALESCE(tracks.artist, releases.artist) AS artist,
+               releases.title AS album,
                tracks.position, tracks.title AS track_title, tracks.bpm
         FROM tracks
         JOIN releases ON releases.release_id = tracks.release_id
@@ -68,6 +69,7 @@ def import_csv():
         print(f"No encuentro {CSV_PATH}. Corré primero: python bpm_manual.py export")
         return
 
+    init_db()  # por si la base viene de una versión anterior
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -85,10 +87,14 @@ def import_csv():
                 print(f"   BPM inválido para track_id {row['track_id']}: '{bpm_texto}' (lo salteo)")
                 continue
 
+            # Cargarlo a mano ES la validación manual: queda con la ✓,
+            # y anotado como fuente 'manual' junto a las demás.
             cursor.execute(
-                "UPDATE tracks SET bpm = ?, bpm_source = 'manual' WHERE id = ?",
+                "UPDATE tracks SET bpm = ?, bpm_source = 'manual', bpm_alt = NULL,"
+                " bpm_needs_review = 0, bpm_verified = 1 WHERE id = ?",
                 (bpm, row["track_id"]),
             )
+            registrar_bpm_fuente(conn, int(row["track_id"]), "manual", bpm)
             actualizados += 1
 
     conn.commit()

@@ -6,4 +6,5 @@ brother-ql-inventree
 pyusb
 yt-dlp
 librosa
+deeprhythm
 imageio-ffmpeg

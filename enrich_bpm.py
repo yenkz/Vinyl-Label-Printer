@@ -1,18 +1,18 @@
 """
-enrich_bpm.py — PASO 2
+enrich_bpm.py — PASO 6 (opcional, la última red)
 
-Para cada track que todavía no tiene BPM guardado, lo busca
-automáticamente en internet:
+Para cada track que sigue sin BPM (porque Beatport no lo tuvo y la
+medición de audio tampoco pudo), lo busca automáticamente:
 
   1. Primero en Deezer, que es gratis y no pide ninguna clave.
   2. Si no aparece y configuraste GETSONGBPM_API_KEY en config.py,
      prueba también en getsongbpm.com.
 
 Esto es "mejor esfuerzo": vinilos raros, ediciones de nicho, remixes
-o tracks instrumentales sin nombre suelen no aparecer. Los que no se
-encuentren quedan con BPM vacío, y los completás a mano después con
-bpm_manual.py — es totalmente normal tener que hacerlo para una
-parte de tu colección.
+o tracks instrumentales sin nombre suelen no aparecer. Lo que se
+encuentre queda anotado como fuente en bpm_sources y SIN validar:
+la ✓ la ponés vos en el editor (edit_bpm.py), que muestra todas las
+fuentes lado a lado. Lo que no aparezca se carga a mano ahí mismo.
 
 Cómo correrlo:
     python enrich_bpm.py
@@ -24,7 +24,7 @@ import urllib.parse
 import requests
 
 import config
-from db import get_connection, init_db
+from db import get_connection, init_db, registrar_bpm_fuente
 
 DEEZER_API = "https://api.deezer.com"
 GETSONGBPM_API = "https://api.getsong.co"
@@ -114,7 +114,11 @@ def buscar_bpm_getsongbpm(titulo, artista):
     except ValueError:
         return None
     resultados = data.get("search") or []
-    if not resultados:
+    # getsongbpm.com a veces devuelve un solo resultado como dict en vez
+    # de una lista de un elemento, y "error" (string) cuando no hay match.
+    if isinstance(resultados, dict):
+        resultados = [resultados]
+    if not resultados or not isinstance(resultados, list):
         return None
 
     tempo = resultados[0].get("tempo")
@@ -131,7 +135,8 @@ def main():
 
     cursor.execute(
         """
-        SELECT tracks.id, tracks.title, releases.artist
+        SELECT tracks.id, tracks.title,
+               COALESCE(tracks.artist, releases.artist) AS artist
         FROM tracks
         JOIN releases ON releases.release_id = tracks.release_id
         WHERE tracks.bpm IS NULL
@@ -164,6 +169,7 @@ def main():
                 "UPDATE tracks SET bpm = ?, bpm_source = ? WHERE id = ?",
                 (bpm, fuente, row["id"]),
             )
+            registrar_bpm_fuente(conn, row["id"], fuente, bpm)
             conn.commit()
             encontrados[fuente] += 1
             print(f"[{i}/{len(pendientes)}] OK  {row['artist']} - {row['title']} -> {bpm:g} BPM ({fuente})")
@@ -178,7 +184,8 @@ def main():
     print("\n" + "=" * 50)
     print(f"BPM encontrado automáticamente para {total_ok} de {len(pendientes)} tracks")
     print(f"(Deezer: {encontrados['deezer']}, getsongbpm: {encontrados['getsongbpm']}).")
-    print("Para completar el resto a mano, corré: python bpm_manual.py export")
+    print("Nada queda validado solo: confirmalos en el editor, que ahí")
+    print("ves todas las fuentes de cada track: python edit_bpm.py")
 
 
 if __name__ == "__main__":

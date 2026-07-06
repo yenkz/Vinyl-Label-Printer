@@ -3,15 +3,21 @@
 # Uso:
 #   make            -> muestra esta ayuda
 #   make setup      -> instala todo (una sola vez)
-#   make fetch      -> paso 1: trae tu colección de Discogs
-#   make bpm        -> paso 2: busca BPM automáticamente
-#   make analizar   -> paso 2b: mide los que faltan desde YouTube
-#                      (make analizar n=5 para probar con 5)
-#   make export     -> paso 3a: exporta CSV con los BPM que faltan
-#   make import     -> paso 3b: importa el CSV completado
-#   make render     -> paso 4: genera todas las etiquetas
-#   make prueba     -> paso 5 en modo de prueba (sin impresora)
-#   make print      -> paso 5: imprime lo pendiente
+#   make fetch      -> paso 1: colección y tapas desde Discogs
+#   make beatport   -> paso 2: BPM y key desde Beatport, para TODOS
+#                      los tracks (make beatport n=5 para probar)
+#   make bandcamp   -> paso 3: tapas/duraciones que falten (Bandcamp)
+#   make spotify    -> paso 4: último respaldo (tapa, duraciones, ISRC)
+#   make analizar   -> paso 5: mide lo que Beatport no tuvo, desde
+#                      YouTube (make analizar n=5 para probar con 5)
+#   make bpm        -> paso 6: última red para BPM (Deezer, opcional)
+#   make auditar    -> re-chequea lo medido con la versión vieja
+#                      (una sola vez; make auditar n=5 para probar)
+#   make editar     -> paso 7: editor y VALIDADOR de BPM y key (la ✓
+#                      la ponés vos ahí, viendo todas las fuentes)
+#   make render     -> paso 8: genera todas las etiquetas
+#   make prueba     -> paso 9 en modo de prueba (sin impresora)
+#   make print      -> paso 9: imprime lo pendiente
 #
 # Los pasos con filtro aceptan d=texto (d de "disco"):
 #   make render d=aphex   -> solo discos que contengan "aphex"
@@ -19,7 +25,8 @@
 #   make prueba d=aphex
 #   make print d=aphex
 #
-# Y para hacer todo de una (fetch + bpm + render):
+# Y para hacer todo de una (fetch + beatport + bandcamp + spotify +
+# bpm + render):
 #   make todo
 
 # uv vive en ~/.local/bin, que no siempre está en el PATH de make,
@@ -28,7 +35,7 @@ UV := $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
 
 PYTHON := .venv/bin/python
 
-.PHONY: help setup fetch bpm analizar export import render ver prueba print todo
+.PHONY: help setup fetch beatport bandcamp spotify bpm analizar auditar editar export import render ver prueba print todo
 
 help:
 	@awk '/^#/ { sub(/^# ?/, ""); print; next } { exit }' Makefile
@@ -43,12 +50,28 @@ setup:
 fetch:
 	$(PYTHON) fetch_discogs.py
 
+beatport:
+	$(PYTHON) enrich_beatport.py $(n)
+
+bandcamp:
+	$(PYTHON) enrich_bandcamp.py
+
+spotify:
+	$(PYTHON) enrich_spotify.py
+
 bpm:
 	$(PYTHON) enrich_bpm.py
 
 analizar:
 	$(PYTHON) analyze_bpm.py $(n)
 
+auditar:
+	$(PYTHON) audit_bpm.py $(n)
+
+editar:
+	$(PYTHON) edit_bpm.py
+
+# (fallback: el viejo flujo por CSV sigue andando con export/import)
 export:
 	$(PYTHON) bpm_manual.py export
 
@@ -67,5 +90,5 @@ prueba:
 print:
 	$(PYTHON) print_labels.py $(d)
 
-# make todo -> corre fetch + bpm + render de una (el print queda a mano)
-todo: fetch bpm render
+# make todo -> corre todos los pasos automáticos de una (el print queda a mano)
+todo: fetch beatport bandcamp spotify bpm render
