@@ -35,8 +35,8 @@ import sys
 import tempfile
 import time
 
-from analyze_bpm import TOLERANCE_BPM, analyze_track, parsear_duracion
-from db import get_connection, init_db, registrar_bpm_fuente
+from analyze_bpm import TOLERANCE_BPM, analyze_track, parse_duration
+from db import get_connection, init_db, record_bpm_source
 
 
 def main():
@@ -87,7 +87,7 @@ def main():
             try:
                 new, _, _, detail = analyze_track(
                     row["artist"], row["title"],
-                    parsear_duracion(row["duration_display"]), tmpdir,
+                    parse_duration(row["duration_display"]), tmpdir,
                     row["catno"],
                 )
             except KeyboardInterrupt:
@@ -102,7 +102,7 @@ def main():
             elif abs(new - row["bpm"]) <= TOLERANCE_BPM:
                 # Two independent measurements agree: it's noted
                 # (in the editor you validate it with one click).
-                registrar_bpm_fuente(conn, row["id"], "youtube", new, detail)
+                record_bpm_source(conn, row["id"], "youtube", new, detail)
                 conn.commit()
                 confirmed += 1
                 print(f"{label} -> {row['bpm']:g} BPM matches (validate in editor)")
@@ -114,7 +114,7 @@ def main():
                     " bpm_verified = 0 WHERE id = ?",
                     (new, row["bpm"], row["id"]),
                 )
-                registrar_bpm_fuente(conn, row["id"], "youtube", new, detail)
+                record_bpm_source(conn, row["id"], "youtube", new, detail)
                 conn.commit()
                 corrected += 1
                 print(f"{label} -> {row['bpm']:g} seems mismeasured: "

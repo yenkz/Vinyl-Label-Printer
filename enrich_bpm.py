@@ -24,7 +24,7 @@ import urllib.parse
 import requests
 
 import config
-from db import get_connection, init_db, registrar_bpm_fuente
+from db import get_connection, init_db, record_bpm_source
 
 DEEZER_API = "https://api.deezer.com"
 GETSONGBPM_API = "https://api.getsong.co"
@@ -168,7 +168,7 @@ def main():
                 "UPDATE tracks SET bpm = ?, bpm_source = ? WHERE id = ?",
                 (bpm, source, row["id"]),
             )
-            registrar_bpm_fuente(conn, row["id"], source, bpm)
+            record_bpm_source(conn, row["id"], source, bpm)
             conn.commit()
             found[source] += 1
             print(f"[{i}/{len(pending)}] OK  {row['artist']} - {row['title']} -> {bpm:g} BPM ({source})")

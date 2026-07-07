@@ -27,7 +27,7 @@ import discogs_client
 from discogs_client.exceptions import HTTPError
 
 import config
-from comunes import bajar_tapa
+from common import download_cover
 from db import get_connection, init_db
 
 
@@ -113,13 +113,13 @@ def main():
 
             cursor.execute(
                 """
-                INSERT INTO releases (release_id, artist, title, year, sello, catno, released)
+                INSERT INTO releases (release_id, artist, title, year, label, catno, released)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(release_id) DO UPDATE SET
                     artist = excluded.artist,
                     title = excluded.title,
                     year = excluded.year,
-                    sello = excluded.sello,
+                    label = excluded.label,
                     catno = excluded.catno,
                     released = excluded.released
                 """,
@@ -137,7 +137,7 @@ def main():
                 images = release.data.get("images") or []
                 primary = [im for im in images if im.get("type") == "primary"] or images
                 if primary and primary[0].get("uri"):
-                    path = bajar_tapa(primary[0]["uri"], release.id)
+                    path = download_cover(primary[0]["uri"], release.id)
                     if path:
                         cursor.execute(
                             "UPDATE releases SET cover_path = ? WHERE release_id = ?",

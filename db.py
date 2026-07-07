@@ -35,7 +35,7 @@ def init_db():
     conn = get_connection()
     # If the sources table doesn't exist yet, after creating it we
     # populate it with what's already in tracks (see below).
-    tablas = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS releases (
@@ -43,7 +43,7 @@ def init_db():
             artist       TEXT,
             title        TEXT,
             year         INTEGER,
-            sello        TEXT,     -- record label, from Discogs
+            label        TEXT,     -- record label, from Discogs
             catno        TEXT,     -- catalog number (e.g., "DDC005"), from Discogs
             released     TEXT,     -- vinyl release date ("2024-12-30"), from Discogs
             cover_path   TEXT      -- local path to downloaded cover (covers/<id>.jpg)
@@ -64,6 +64,9 @@ def init_db():
             key               TEXT,     -- tonality ("Am", "F#"); displayed on label in Camelot ("8A")
             key_source        TEXT,     -- "beatport", "manual", or NULL
             isrc              TEXT,     -- ISRC code for track (from Spotify or Beatport); not printed
+            audio_path        TEXT,     -- local path to digital copy downloaded from Soulseek; NULL = not downloaded
+            audio_format      TEXT,     -- "aiff", "flac", "wav", "mp3"
+            audio_source      TEXT,     -- Soulseek user the file came from (provenance)
             FOREIGN KEY (release_id) REFERENCES releases(release_id)
         );
 
@@ -79,30 +82,41 @@ def init_db():
     )
     # Migration: if the database existed before we added these
     # columns, we add them now.
-    columnas = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
-    if "artist" not in columnas:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
+    if "artist" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN artist TEXT")
-    if "bpm_alt" not in columnas:
+    if "bpm_alt" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN bpm_alt REAL")
-    if "bpm_needs_review" not in columnas:
+    if "bpm_needs_review" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN bpm_needs_review INTEGER DEFAULT 0")
-    if "bpm_verified" not in columnas:
+    if "bpm_verified" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN bpm_verified INTEGER DEFAULT 0")
         # BPM entered manually were already validated by you when you wrote them.
         conn.execute("UPDATE tracks SET bpm_verified = 1 WHERE bpm_source = 'manual'")
-    if "isrc" not in columnas:
+    if "isrc" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN isrc TEXT")
-    if "key" not in columnas:
+    if "key" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN key TEXT")
-    if "key_source" not in columnas:
+    if "key_source" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN key_source TEXT")
-    columnas_releases = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
-    for columna in ("sello", "catno", "released", "cover_path"):
-        if columna not in columnas_releases:
-            conn.execute(f"ALTER TABLE releases ADD COLUMN {columna} TEXT")
+    # Digital copy downloaded from Soulseek (download_music.py):
+    if "audio_path" not in columns:
+        conn.execute("ALTER TABLE tracks ADD COLUMN audio_path TEXT")     # local file, NULL = not downloaded
+    if "audio_format" not in columns:
+        conn.execute("ALTER TABLE tracks ADD COLUMN audio_format TEXT")   # "aiff", "flac", "wav", "mp3"
+    if "audio_source" not in columns:
+        conn.execute("ALTER TABLE tracks ADD COLUMN audio_source TEXT")   # Soulseek user it came from
+    columns_releases = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
+    # Migration: the record-label column was renamed from "sello" to "label".
+    if "sello" in columns_releases and "label" not in columns_releases:
+        conn.execute("ALTER TABLE releases RENAME COLUMN sello TO label")
+        columns_releases.add("label")
+    for column in ("label", "catno", "released", "cover_path"):
+        if column not in columns_releases:
+            conn.execute(f"ALTER TABLE releases ADD COLUMN {column} TEXT")
     # Migration: the first time bpm_sources appears, we record there
     # the BPM that already existed in tracks, each under its source.
-    if "bpm_sources" not in tablas:
+    if "bpm_sources" not in tables:
         conn.execute(
             "INSERT OR IGNORE INTO bpm_sources (track_id, source, bpm)"
             " SELECT id, bpm_source, bpm FROM tracks"
@@ -112,7 +126,7 @@ def init_db():
     conn.close()
 
 
-def registrar_bpm_fuente(conn, track_id, fuente, bpm, detalle=None):
+def record_bpm_source(conn, track_id, source, bpm, detail=None):
     """Records (or updates) what BPM a source reported for a track.
     bpm as None means "I consulted it and it didn't have the track" — this helps
     so enrich_beatport.py doesn't ask for it again.
@@ -120,7 +134,7 @@ def registrar_bpm_fuente(conn, track_id, fuente, bpm, detalle=None):
     conn.execute(
         "INSERT INTO bpm_sources (track_id, source, bpm, detail) VALUES (?, ?, ?, ?)"
         " ON CONFLICT(track_id, source) DO UPDATE SET bpm = excluded.bpm, detail = excluded.detail",
-        (track_id, fuente, bpm, detalle),
+        (track_id, source, bpm, detail),
     )
 
 

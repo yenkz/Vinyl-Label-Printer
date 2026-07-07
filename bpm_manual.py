@@ -21,9 +21,9 @@ import csv
 import sys
 from pathlib import Path
 
-from db import get_connection, init_db, registrar_bpm_fuente
+from db import get_connection, init_db, record_bpm_source
 
-CSV_PATH = Path(__file__).parent / "bpm_pendientes.csv"
+CSV_PATH = Path(__file__).parent / "bpm_pending.csv"
 
 
 def export_csv():
@@ -92,7 +92,7 @@ def import_csv():
                 " bpm_needs_review = 0, bpm_verified = 1 WHERE id = ?",
                 (bpm, row["track_id"]),
             )
-            registrar_bpm_fuente(conn, int(row["track_id"]), "manual", bpm)
+            record_bpm_source(conn, int(row["track_id"]), "manual", bpm)
             updated += 1
 
     conn.commit()

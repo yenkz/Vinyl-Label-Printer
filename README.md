@@ -135,7 +135,7 @@ Notes:
   run **once** `python audit_bpm.py`: re-measures all old automatic BPMs, corrects
   ones that were measured wrong, and notes the re-measurement as source — everything
   is ready for step 7 validation.
-- Step 7 (`make editar`) launches a local page (only you see it) with your whole
+- Step 7 (`make edit`) launches a local page (only you see it) with your whole
   collection: search bar, BPM and key fields per track, and each change auto-saves.
   You can write the key in Camelot ("8A") or musical notation ("Am", "f# minor").
   Anything you enter there is saved as `manual` and nothing overwrites it. If you
@@ -154,14 +154,75 @@ Notes:
   duplicating, **without losing the BPM you already entered**, and removes from
   the database records no longer in your collection. Discogs rate-limits, so it
   takes ~1 second per record.
-- Step 8 can generate just some records and show them before printing: `python render_labels.py aphex --ver`
+- Step 8 can generate just some records and show them before printing: `python render_labels.py aphex --view`
   generates labels for records containing "aphex" and opens them in Preview to check.
-- Step 9 has a **test mode** that doesn't need a printer: `python print_labels.py --prueba`
+- Step 9 has a **test mode** that doesn't need a printer: `python print_labels.py --test`
   shows you what labels would print and how many centimeters of roll they'd use,
   without printing or wasting anything.
-- Step 9 only prints new labels: already-printed ones move to `labels_output/impresas/`.
+- Step 9 only prints new labels: already-printed ones move to `labels_output/printed/`.
   To reprint one, move it back to `labels_output/`. You can also print just some:
   `python print_labels.py aphex` prints those containing "aphex" in the filename.
+
+## Download digital copies (Soulseek) — optional
+
+Once your collection is in the database, you can download a **digital copy of
+each record** to play out — sourced from **Soulseek** (a peer-to-peer music
+network), preferring lossless. Files land, tagged and with cover art, in a tidy
+per-record library:
+
+```
+~/Music/Vinyl/<Artist> - <Album> (<CATNO>)/<position> <Title>.<ext>
+```
+
+Format preference is **AIFF → FLAC → WAV → MP3 320**, kept as found (no
+conversion; rekordbox/Serato read all four). This is a personal copy of records
+you already own on vinyl.
+
+The downloading itself is done by **slskd**, a small Soulseek program you run in
+the background; this project just drives it.
+
+**One-time setup:**
+
+1. **Free Soulseek account** — register a username/password in the Soulseek
+   client or at https://www.slsknet.org/ (slskd logs in with it).
+2. **Install slskd** — download the self-contained binary for macOS (Apple
+   Silicon: `osx-arm64`) from https://github.com/slskd/slskd/releases, or run it
+   with Docker. Put it somewhere on your `PATH` (e.g. `~/.local/bin/slskd`).
+3. **Configure slskd** in its own `slskd.yml` (run `slskd` once to see where it
+   lives, or use env vars):
+   - your Soulseek `username` / `password`;
+   - a **shared folder** — Soulseek expects you to share something; peers often
+     block users who share nothing, so point it at a folder with some music;
+   - set slskd's **downloads** directory to the same path as `SLSKD_DOWNLOADS_DIR`
+     in your `.env` (default `~/Music/Vinyl/_incoming`) so this project can move
+     finished files into your library;
+   - generate a **web API key** (under `web.authentication.api_keys`).
+4. **Fill in your `.env`:** `SLSKD_API_KEY` (the key from step 3), and if you
+   changed anything, `SLSKD_HOST`, `SLSKD_DOWNLOADS_DIR`, `MUSIC_DIR`.
+
+**Each time:**
+
+```
+make slskd       # in one terminal — starts the daemon, leave it running
+make download    # in another terminal — downloads everything still missing
+```
+
+Or the scripts directly: `python download_music.py`. Handy variants:
+
+- `make download d=aphex` — only records matching "aphex" (good for a first test).
+- `make download force=1` — re-download even records already present.
+
+For each record it first looks for the **whole album from one person** (one
+folder = consistent quality and source), matches that folder's files to your
+track list by title, and grabs the best-format copy of each; anything missing is
+then searched **track by track**. You can stop with **Ctrl+C** anytime — each
+finished track is saved immediately and re-runs resume where you left off.
+Records already fully downloaded are skipped without touching the network.
+
+At the end it lists any tracks it couldn't find, so you can grab those by hand
+on Soulseek or buy them (Bandcamp is ideal for small-label electronic). Dropping
+a purchased lossless file into the record's folder is a fine way to upgrade a
+rip later.
 
 ## Project structure
 
@@ -169,7 +230,7 @@ Notes:
 .env                -> your personal data (tokens) — not uploaded to git
 config.py           -> technical settings (printer, labels, fonts)
 db.py               -> manages local database (SQLite)
-comunes.py          -> shared helpers (matching, covers, keys)
+common.py           -> shared helpers (matching, covers, keys)
 fetch_discogs.py    -> Step 1 (collection + covers, master source)
 enrich_beatport.py  -> Step 2 (BPM and key from Beatport, always)
 enrich_bandcamp.py  -> Step 3 (missing covers/durations)
@@ -181,10 +242,11 @@ edit_bpm.py         -> Step 7 (editor and validator for BPM and key)
 bpm_manual.py       -> Step 7 alternative (CSV export/import)
 render_labels.py    -> Step 8
 print_labels.py     -> Step 9
+download_music.py   -> optional: download digital copies from Soulseek (slskd)
 vinyl_labels.db     -> auto-created, stores your entire collection
 covers/             -> downloaded covers (one per record)
 labels_output/      -> generated images pending printing
-labels_output/impresas/ -> already printed labels
+labels_output/printed/ -> already printed labels
 ```
 
 ## Common issues

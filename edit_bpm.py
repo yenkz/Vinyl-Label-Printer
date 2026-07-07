@@ -33,308 +33,309 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import config
-from comunes import a_camelot, normalizar_key
-from db import get_connection, init_db, registrar_bpm_fuente
+from common import to_camelot, normalize_key
+from db import get_connection, init_db, record_bpm_source
 
 COVERS_DIR = Path(__file__).parent / config.COVERS_DIR
 
-PUERTO = 8765
+PORT = 8765
 
-PAGINA = """<!doctype html>
-<html lang="es">
+PAGE = """<!doctype html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vinyl BPM Editor</title>
 <style>
   :root {
-    --fondo: #f5f4f0; --tarjeta: #ffffff; --tinta: #1a1a1a;
-    --gris: #767370; --linea: #e4e2dd; --acento: #b0433a; --ok: #2e7d4f;
-    --duda: #b07d1e;
+    --bg: #f5f4f0; --card: #ffffff; --ink: #1a1a1a;
+    --muted: #767370; --line: #e4e2dd; --accent: #b0433a; --ok: #2e7d4f;
+    --warn: #b07d1e;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --fondo: #191817; --tarjeta: #232120; --tinta: #ece9e4;
-      --gris: #98938d; --linea: #3a3733; --acento: #e07a6b; --ok: #6fbf8f;
-      --duda: #d9a94a;
+      --bg: #191817; --card: #232120; --ink: #ece9e4;
+      --muted: #98938d; --line: #3a3733; --accent: #e07a6b; --ok: #6fbf8f;
+      --warn: #d9a94a;
     }
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; background: var(--fondo); color: var(--tinta);
+    margin: 0; background: var(--bg); color: var(--ink);
     font: 15px/1.45 -apple-system, "Helvetica Neue", sans-serif;
   }
   header {
-    position: sticky; top: 0; background: var(--fondo);
-    padding: 18px 20px 12px; border-bottom: 1px solid var(--linea);
+    position: sticky; top: 0; background: var(--bg);
+    padding: 18px 20px 12px; border-bottom: 1px solid var(--line);
     display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
   }
   h1 { font-size: 17px; margin: 0; }
-  #resumen { color: var(--gris); font-size: 13px; }
-  #controles { margin-left: auto; display: flex; gap: 12px; align-items: center; }
-  #buscar {
-    font: inherit; padding: 6px 10px; width: 220px; color: var(--tinta);
-    border: 1px solid var(--linea); border-radius: 7px; background: var(--tarjeta);
+  #summary { color: var(--muted); font-size: 13px; }
+  #controls { margin-left: auto; display: flex; gap: 12px; align-items: center; }
+  #search {
+    font: inherit; padding: 6px 10px; width: 220px; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 7px; background: var(--card);
   }
-  label.chk { font-size: 13px; color: var(--gris); user-select: none; cursor: pointer; }
+  label.chk { font-size: 13px; color: var(--muted); user-select: none; cursor: pointer; }
   main { max-width: 860px; margin: 0 auto; padding: 18px 20px 80px; }
-  .disco {
-    background: var(--tarjeta); border: 1px solid var(--linea);
+  .release {
+    background: var(--card); border: 1px solid var(--line);
     border-radius: 10px; margin-bottom: 14px; overflow: hidden;
   }
-  .disco h2 {
+  .release h2 {
     font-size: 14px; margin: 0; padding: 10px 14px;
-    border-bottom: 1px solid var(--linea);
+    border-bottom: 1px solid var(--line);
     display: flex; align-items: center; gap: 10px;
   }
-  .disco h2 small { color: var(--gris); font-weight: normal; }
-  img.tapa {
+  .release h2 small { color: var(--muted); font-weight: normal; }
+  img.cover {
     width: 44px; height: 44px; border-radius: 5px; object-fit: cover;
-    border: 1px solid var(--linea); flex-shrink: 0;
+    border: 1px solid var(--line); flex-shrink: 0;
   }
   table { width: 100%; border-collapse: collapse; }
-  td { padding: 7px 8px; border-top: 1px solid var(--linea); }
+  td { padding: 7px 8px; border-top: 1px solid var(--line); }
   th {
-    font-size: 11px; color: var(--gris); font-weight: 600;
+    font-size: 11px; color: var(--muted); font-weight: 600;
     text-transform: uppercase; letter-spacing: .05em;
     text-align: left; padding: 8px 8px 2px;
   }
   th.pos { padding-left: 14px; }
   th.dur { text-align: right; }
   th.key { text-align: center; }
-  td.pos { width: 44px; color: var(--gris); padding-left: 14px; font-variant-numeric: tabular-nums; }
-  td.dur { width: 60px; color: var(--gris); text-align: right; font-variant-numeric: tabular-nums; }
+  td.pos { width: 44px; color: var(--muted); padding-left: 14px; font-variant-numeric: tabular-nums; }
+  td.dur { width: 60px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
   td.bpm { width: 86px; }
   td.src { padding-right: 8px; }
   input.bpm {
     width: 72px; font: inherit; font-weight: 600; text-align: right;
-    padding: 4px 8px; color: var(--tinta); background: transparent;
-    border: 1px solid var(--linea); border-radius: 7px;
+    padding: 4px 8px; color: var(--ink); background: transparent;
+    border: 1px solid var(--line); border-radius: 7px;
   }
-  input.bpm:focus { outline: 2px solid var(--acento); border-color: transparent; }
-  input.bpm.vacio { border-style: dashed; border-color: var(--acento); }
-  input.bpm.guardado { outline: 2px solid var(--ok); border-color: transparent; }
-  input.bpm.dudoso { border-color: var(--duda); border-width: 2px; }
+  input.bpm:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  input.bpm.empty { border-style: dashed; border-color: var(--accent); }
+  input.bpm.saved { outline: 2px solid var(--ok); border-color: transparent; }
+  input.bpm.doubtful { border-color: var(--warn); border-width: 2px; }
   td.key { width: 64px; }
   input.key {
     width: 52px; font: inherit; text-align: center; padding: 4px 4px;
-    color: var(--tinta); background: transparent;
-    border: 1px solid var(--linea); border-radius: 7px;
+    color: var(--ink); background: transparent;
+    border: 1px solid var(--line); border-radius: 7px;
   }
-  input.key:focus { outline: 2px solid var(--acento); border-color: transparent; }
-  input.key.guardado { outline: 2px solid var(--ok); border-color: transparent; }
-  button.fuente {
-    font: inherit; font-size: 11px; color: var(--gris); cursor: pointer;
-    border: 1px solid var(--linea); border-radius: 20px; padding: 1px 8px;
+  input.key:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  input.key.saved { outline: 2px solid var(--ok); border-color: transparent; }
+  button.source {
+    font: inherit; font-size: 11px; color: var(--muted); cursor: pointer;
+    border: 1px solid var(--line); border-radius: 20px; padding: 1px 8px;
     white-space: nowrap; background: transparent; margin: 1px 4px 1px 0;
   }
-  button.fuente b { font-weight: 600; }
-  button.fuente.activa { color: var(--tinta); border-color: var(--gris); }
-  button.fuente:hover { color: var(--acento); border-color: var(--acento); }
+  button.source b { font-weight: 600; }
+  button.source.active { color: var(--ink); border-color: var(--muted); }
+  button.source:hover { color: var(--accent); border-color: var(--accent); }
   td.rev { width: 120px; padding-right: 14px; white-space: nowrap; }
-  button.alt, button.confirmar {
+  button.alt, button.confirm {
     font: inherit; font-size: 12px; cursor: pointer; border-radius: 7px;
     padding: 3px 9px; background: transparent; margin-right: 6px;
   }
-  button.alt { color: var(--duda); border: 1px solid var(--duda); font-weight: 600; }
-  button.confirmar { color: var(--ok); border: 1px solid var(--ok); }
-  button.alt:hover, button.confirmar:hover { filter: brightness(1.15); }
-  .verificado {
+  button.alt { color: var(--warn); border: 1px solid var(--warn); font-weight: 600; }
+  button.confirm { color: var(--ok); border: 1px solid var(--ok); }
+  button.alt:hover, button.confirm:hover { filter: brightness(1.15); }
+  .verified {
     color: var(--ok); font-size: 12px; font-weight: 600; white-space: nowrap;
   }
-  #nada { color: var(--gris); text-align: center; padding: 40px 0; }
-  #resumen .listo { color: var(--ok); font-weight: 600; }
+  #empty { color: var(--muted); text-align: center; padding: 40px 0; }
+  #summary .done { color: var(--ok); font-weight: 600; }
 </style>
 </head>
 <body>
 <header>
   <h1>Vinyl BPM Editor</h1>
-  <span id="resumen"></span>
-  <div id="controles">
-    <label class="chk"><input type="checkbox" id="soloSin"> solo sin BPM</label>
-    <label class="chk"><input type="checkbox" id="soloDudosos"> solo dudosos</label>
-    <label class="chk"><input type="checkbox" id="soloSinValidar"> solo sin validar</label>
-    <input id="buscar" type="search" placeholder="buscar disco o track…">
+  <span id="summary"></span>
+  <div id="controls">
+    <label class="chk"><input type="checkbox" id="onlyMissing"> only missing BPM</label>
+    <label class="chk"><input type="checkbox" id="onlyDoubtful"> only doubtful</label>
+    <label class="chk"><input type="checkbox" id="onlyUnvalidated"> only unvalidated</label>
+    <input id="search" type="search" placeholder="search record or track…">
   </div>
 </header>
-<main id="lista"></main>
-<div id="nada" hidden>Nada que mostrar con ese filtro.</div>
+<main id="list"></main>
+<div id="empty" hidden>Nothing to show for that filter.</div>
 
 <script>
-let datos = { releases: [] };
+let data = { releases: [] };
 
-async function cargar() {
+async function load() {
   const r = await fetch('/api/data');
-  datos = await r.json();
-  pintar();
+  data = await r.json();
+  render();
 }
 
-function pintar() {
-  const filtro = document.getElementById('buscar').value.toLowerCase();
-  const soloSin = document.getElementById('soloSin').checked;
-  const soloDudosos = document.getElementById('soloDudosos').checked;
-  const soloSinValidar = document.getElementById('soloSinValidar').checked;
-  const lista = document.getElementById('lista');
-  lista.textContent = '';
-  let pendientes = 0, dudosos = 0, sinValidar = 0, validados = 0, total = 0, visibles = 0;
+function render() {
+  const query = document.getElementById('search').value.toLowerCase();
+  const onlyMissing = document.getElementById('onlyMissing').checked;
+  const onlyDoubtful = document.getElementById('onlyDoubtful').checked;
+  const onlyUnvalidated = document.getElementById('onlyUnvalidated').checked;
+  const list = document.getElementById('list');
+  list.textContent = '';
+  let pending = 0, doubtful = 0, unvalidated = 0, validated = 0, total = 0, visible = 0;
 
-  for (const disco of datos.releases) {
-    const enDisco = (disco.artist + ' ' + disco.title).toLowerCase().includes(filtro);
-    let tracks = disco.tracks.filter(t =>
-      (enDisco || t.title.toLowerCase().includes(filtro) ||
-        (t.artist || '').toLowerCase().includes(filtro)) &&
-      (!soloSin || t.bpm === null) &&
-      (!soloDudosos || t.review) &&
-      (!soloSinValidar || (t.bpm !== null && !t.verified)));
-    total += disco.tracks.length;
-    pendientes += disco.tracks.filter(t => t.bpm === null).length;
-    dudosos += disco.tracks.filter(t => t.review).length;
-    sinValidar += disco.tracks.filter(t => t.bpm !== null && !t.verified).length;
-    validados += disco.tracks.filter(t => t.verified).length;
+  for (const release of data.releases) {
+    const inRelease = (release.artist + ' ' + release.title).toLowerCase().includes(query);
+    let tracks = release.tracks.filter(t =>
+      (inRelease || t.title.toLowerCase().includes(query) ||
+        (t.artist || '').toLowerCase().includes(query)) &&
+      (!onlyMissing || t.bpm === null) &&
+      (!onlyDoubtful || t.review) &&
+      (!onlyUnvalidated || (t.bpm !== null && !t.verified)));
+    total += release.tracks.length;
+    pending += release.tracks.filter(t => t.bpm === null).length;
+    doubtful += release.tracks.filter(t => t.review).length;
+    unvalidated += release.tracks.filter(t => t.bpm !== null && !t.verified).length;
+    validated += release.tracks.filter(t => t.verified).length;
     if (!tracks.length) continue;
-    visibles++;
+    visible++;
 
-    const caja = document.createElement('section');
-    caja.className = 'disco';
+    const box = document.createElement('section');
+    box.className = 'release';
     const h = document.createElement('h2');
-    if (disco.cover) {
+    if (release.cover) {
       const im = document.createElement('img');
-      im.className = 'tapa';
-      im.src = '/covers/' + disco.id + '.jpg';
+      im.className = 'cover';
+      im.src = '/covers/' + release.id + '.jpg';
       im.loading = 'lazy';
       im.alt = '';
       h.appendChild(im);
     }
-    const nombre = document.createElement('span');
-    nombre.textContent = disco.artist + ' — ' + disco.title + ' ';
-    if (disco.year) {
+    const name = document.createElement('span');
+    name.textContent = release.artist + ' — ' + release.title + ' ';
+    if (release.year) {
       const s = document.createElement('small');
-      s.textContent = '(' + disco.year + ')';
-      nombre.appendChild(s);
+      s.textContent = '(' + release.year + ')';
+      name.appendChild(s);
     }
-    h.appendChild(nombre);
-    caja.appendChild(h);
+    h.appendChild(name);
+    box.appendChild(h);
 
-    const tabla = document.createElement('table');
-    const titulos = document.createElement('tr');
+    const table = document.createElement('table');
+    const headers = document.createElement('tr');
     for (const [cls, txt] of [['pos', ''], ['', ''], ['dur', 'dur'],
-                              ['bpm', 'BPM'], ['key', 'key'], ['src', 'fuentes'], ['rev', '']]) {
+                              ['bpm', 'BPM'], ['key', 'key'], ['src', 'sources'], ['rev', '']]) {
       const th = document.createElement('th');
-      th.className = cls; th.textContent = txt; titulos.appendChild(th);
+      th.className = cls; th.textContent = txt; headers.appendChild(th);
     }
-    tabla.appendChild(titulos);
+    table.appendChild(headers);
     for (const t of tracks) {
       const tr = document.createElement('tr');
-      const celda = (cls, txt) => {
+      const cell = (cls, txt) => {
         const td = document.createElement('td');
         td.className = cls; td.textContent = txt; tr.appendChild(td); return td;
       };
-      celda('pos', t.position);
-      celda('', t.artist ? t.artist + ' – ' + t.title : t.title);
-      celda('dur', t.duration || '');
-      const tdBpm = celda('bpm', '');
+      cell('pos', t.position);
+      cell('', t.artist ? t.artist + ' – ' + t.title : t.title);
+      cell('dur', t.duration || '');
+      const tdBpm = cell('bpm', '');
       const inp = document.createElement('input');
-      inp.className = 'bpm' + (t.bpm === null ? ' vacio' : '') + (t.review ? ' dudoso' : '');
+      inp.className = 'bpm' + (t.bpm === null ? ' empty' : '') + (t.review ? ' doubtful' : '');
       inp.placeholder = '?';
       inp.inputMode = 'decimal';
       inp.value = t.bpm === null ? '' : t.bpm;
       inp.dataset.id = t.id;
-      inp.addEventListener('change', guardar);
+      inp.addEventListener('change', onBpmChange);
       inp.addEventListener('keydown', e => { if (e.key === 'Enter') e.target.blur(); });
       tdBpm.appendChild(inp);
-      const tdKey = celda('key', '');
+      const tdKey = cell('key', '');
       const kin = document.createElement('input');
       kin.className = 'key';
       kin.value = t.camelot || '';
       kin.dataset.id = t.id;
       kin.title = t.key
         ? 'Key ' + t.key + (t.key_source ? ' (' + t.key_source + ')' : '')
-        : 'Tonalidad: en Camelot ("8A") o musical ("Am")';
-      kin.addEventListener('change', guardarKey);
+        : 'Key: Camelot ("8A") or musical ("Am")';
+      kin.addEventListener('change', onKeyChange);
       kin.addEventListener('keydown', e => { if (e.key === 'Enter') e.target.blur(); });
       tdKey.appendChild(kin);
-      // Una píldora por cada fuente que dio un BPM, con su valor.
-      // La de la fuente actual va resaltada. Click en cualquiera:
-      // ese valor pasa a ser EL BPM del track y queda validado por
-      // vos (la validación siempre es tuya, nunca automática).
-      const tdSrc = celda('src', '');
-      const ordenFuentes = { manual: 0, beatport: 1, youtube: 2, deezer: 3, getsongbpm: 4 };
-      const fuentes = (t.sources || []).slice()
-        .sort((a, b) => (ordenFuentes[a.source] ?? 9) - (ordenFuentes[b.source] ?? 9));
-      for (const f of fuentes) {
+      // One pill per source that reported a BPM, with its value. The one
+      // for the current source is highlighted. Click any of them: that
+      // value becomes THE track's BPM and is validated by you (validation
+      // is always yours, never automatic).
+      const tdSrc = cell('src', '');
+      const sourceOrder = { manual: 0, beatport: 1, youtube: 2, deezer: 3, getsongbpm: 4 };
+      const sources = (t.sources || []).slice()
+        .sort((a, b) => (sourceOrder[a.source] ?? 9) - (sourceOrder[b.source] ?? 9));
+      for (const f of sources) {
         const b = document.createElement('button');
-        b.className = 'fuente' + (t.source === f.source ? ' activa' : '');
+        b.className = 'source' + (t.source === f.source ? ' active' : '');
         b.append(f.source + ' ');
         const val = document.createElement('b');
         val.textContent = f.bpm;
         b.appendChild(val);
         b.title = (f.detail ? f.detail + '\\n' : '') +
-          'Click: usar ' + f.bpm + ' BPM (' + f.source + ') y darlo por validado';
-        b.addEventListener('click', () => usarFuente(t.id, f.source));
+          'Click: use ' + f.bpm + ' BPM (' + f.source + ') and mark it validated';
+        b.addEventListener('click', () => useSource(t.id, f.source));
         tdSrc.appendChild(b);
       }
-      const tdRev = celda('rev', '');
+      const tdRev = cell('rev', '');
       if (t.review) {
-        // El otro detector midió distinto: un click y queda ese valor.
+        // The other detector measured something different: one click and
+        // that value is used.
         if (t.alt !== null) {
           const b = document.createElement('button');
           b.className = 'alt';
-          b.textContent = '¿' + t.alt + '?';
-          b.title = 'El otro detector midió ' + t.alt + ' — click para usar ese valor';
-          b.addEventListener('click', () => guardarValor(t.id, t.alt));
+          b.textContent = t.alt + '?';
+          b.title = 'The other detector measured ' + t.alt + ' — click to use that value';
+          b.addEventListener('click', () => saveValue(t.id, t.alt));
           tdRev.appendChild(b);
         }
         const ok = document.createElement('button');
-        ok.className = 'confirmar';
+        ok.className = 'confirm';
         ok.textContent = '✓';
-        ok.title = 'El BPM actual está bien: validarlo';
-        ok.addEventListener('click', () => confirmar(t.id));
+        ok.title = 'The current BPM is right: validate it';
+        ok.addEventListener('click', () => confirmTrack(t.id));
         tdRev.appendChild(ok);
       } else if (t.verified) {
-        // Validado: lo confirmaste vos (la ✓ nunca es automática).
+        // Validated: you confirmed it (the ✓ is never automatic).
         const v = document.createElement('span');
-        v.className = 'verificado';
-        v.textContent = '✓ validado';
-        v.title = 'BPM validado por vos';
+        v.className = 'verified';
+        v.textContent = '✓ validated';
+        v.title = 'BPM validated by you';
         tdRev.appendChild(v);
       } else if (t.bpm !== null) {
-        // Tiene BPM pero nadie lo validó: un click lo da por bueno.
+        // Has a BPM but nobody validated it: one click marks it good.
         const ok = document.createElement('button');
-        ok.className = 'confirmar';
+        ok.className = 'confirm';
         ok.textContent = '✓';
-        ok.title = 'Sin validar: mirá las fuentes y, si te cierra, click para validarlo';
-        ok.addEventListener('click', () => confirmar(t.id));
+        ok.title = 'Unvalidated: check the sources and, if it looks right, click to validate it';
+        ok.addEventListener('click', () => confirmTrack(t.id));
         tdRev.appendChild(ok);
       }
-      tabla.appendChild(tr);
+      table.appendChild(tr);
     }
-    caja.appendChild(tabla);
-    lista.appendChild(caja);
+    box.appendChild(table);
+    list.appendChild(box);
   }
 
-  document.getElementById('nada').hidden = visibles > 0;
-  const resumen = document.getElementById('resumen');
-  if (total && validados === total) {
-    resumen.innerHTML = '<span class="listo">colección completa: ' +
-      total + '/' + total + ' BPM validados ✓</span>';
+  document.getElementById('empty').hidden = visible > 0;
+  const summary = document.getElementById('summary');
+  if (total && validated === total) {
+    summary.innerHTML = '<span class="done">collection complete: ' +
+      total + '/' + total + ' BPM validated ✓</span>';
   } else {
-    const partes = [validados + '/' + total + ' validados'];
-    if (pendientes) partes.push(pendientes + ' sin BPM');
-    if (dudosos) partes.push(dudosos + ' dudosos');
-    if (sinValidar - dudosos > 0) partes.push((sinValidar - dudosos) + ' sin validar');
-    resumen.textContent = partes.join(' · ');
+    const parts = [validated + '/' + total + ' validated'];
+    if (pending) parts.push(pending + ' without BPM');
+    if (doubtful) parts.push(doubtful + ' doubtful');
+    if (unvalidated - doubtful > 0) parts.push((unvalidated - doubtful) + ' unvalidated');
+    summary.textContent = parts.join(' · ');
   }
 }
 
-async function guardarValor(id, bpm) {
+async function saveValue(id, bpm) {
   const r = await fetch('/api/bpm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: id, bpm: bpm }),
   });
   if (!r.ok) return false;
-  for (const disco of datos.releases)
-    for (const t of disco.tracks)
+  for (const release of data.releases)
+    for (const t of release.tracks)
       if (t.id == id) {
         t.bpm = bpm; t.source = bpm === null ? null : 'manual';
         t.review = 0; t.alt = null; t.verified = bpm === null ? 0 : 1;
@@ -344,101 +345,101 @@ async function guardarValor(id, bpm) {
   return true;
 }
 
-async function usarFuente(id, source) {
-  const r = await fetch('/api/fuente', {
+async function useSource(id, source) {
+  const r = await fetch('/api/source', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: id, source: source }),
   });
   if (!r.ok) return;
   const res = await r.json();
-  for (const disco of datos.releases)
-    for (const t of disco.tracks)
+  for (const release of data.releases)
+    for (const t of release.tracks)
       if (t.id == id) {
         t.bpm = res.bpm; t.source = source;
         t.review = 0; t.alt = null; t.verified = 1;
       }
-  pintar();
+  render();
 }
 
-async function guardar(e) {
+async function onBpmChange(e) {
   const inp = e.target;
-  const texto = inp.value.trim().replace(',', '.');
+  const text = inp.value.trim().replace(',', '.');
   let bpm = null;
-  if (texto !== '') {
-    bpm = parseFloat(texto);
+  if (text !== '') {
+    bpm = parseFloat(text);
     if (isNaN(bpm) || bpm < 30 || bpm > 300) { inp.select(); return; }
   }
-  if (!await guardarValor(parseInt(inp.dataset.id), bpm)) return;
-  inp.classList.toggle('vacio', bpm === null);
-  inp.classList.add('guardado');
-  setTimeout(() => inp.classList.remove('guardado'), 900);
-  pintar();
+  if (!await saveValue(parseInt(inp.dataset.id), bpm)) return;
+  inp.classList.toggle('empty', bpm === null);
+  inp.classList.add('saved');
+  setTimeout(() => inp.classList.remove('saved'), 900);
+  render();
 }
 
-async function guardarKey(e) {
+async function onKeyChange(e) {
   const inp = e.target;
   const r = await fetch('/api/key', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: parseInt(inp.dataset.id), key: inp.value.trim() }),
   });
-  if (!r.ok) { inp.select(); return; }  // no se entendió la key: corregila
+  if (!r.ok) { inp.select(); return; }  // key not understood: fix it
   const res = await r.json();
-  for (const disco of datos.releases)
-    for (const t of disco.tracks)
+  for (const release of data.releases)
+    for (const t of release.tracks)
       if (t.id == inp.dataset.id) {
         t.key = res.key; t.camelot = res.camelot;
         t.key_source = res.key ? 'manual' : null;
       }
   inp.value = res.camelot;
-  inp.title = res.key ? 'Key ' + res.key + ' (manual)' : 'Tonalidad: en Camelot ("8A") o musical ("Am")';
-  inp.classList.add('guardado');
-  setTimeout(() => inp.classList.remove('guardado'), 900);
+  inp.title = res.key ? 'Key ' + res.key + ' (manual)' : 'Key: Camelot ("8A") or musical ("Am")';
+  inp.classList.add('saved');
+  setTimeout(() => inp.classList.remove('saved'), 900);
 }
 
-async function confirmar(id) {
-  const r = await fetch('/api/confirmar', {
+async function confirmTrack(id) {
+  const r = await fetch('/api/confirm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: id }),
   });
   if (!r.ok) return;
-  for (const disco of datos.releases)
-    for (const t of disco.tracks)
+  for (const release of data.releases)
+    for (const t of release.tracks)
       if (t.id == id) { t.review = 0; t.alt = null; t.verified = 1; }
-  pintar();
+  render();
 }
 
-document.getElementById('buscar').addEventListener('input', pintar);
-document.getElementById('soloSin').addEventListener('change', pintar);
-document.getElementById('soloDudosos').addEventListener('change', pintar);
-document.getElementById('soloSinValidar').addEventListener('change', pintar);
+document.getElementById('search').addEventListener('input', render);
+document.getElementById('onlyMissing').addEventListener('change', render);
+document.getElementById('onlyDoubtful').addEventListener('change', render);
+document.getElementById('onlyUnvalidated').addEventListener('change', render);
 
-// Refresca cada 20s (por si analyze_bpm.py está corriendo en paralelo),
-// salvo que estés escribiendo un BPM o una key en ese momento.
+// Refresh every 20s (in case analyze_bpm.py is running in parallel),
+// unless you're typing a BPM or a key at that moment.
 setInterval(() => {
-  const activo = document.activeElement;
-  if (!activo || !(activo.classList.contains('bpm') || activo.classList.contains('key'))) cargar();
+  const active = document.activeElement;
+  if (!active || !(active.classList.contains('bpm') || active.classList.contains('key'))) load();
 }, 20000);
 
-cargar();
+load();
 </script>
 </body>
 </html>
 """
 
 
-def leer_datos():
+def read_data():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Todas las fuentes que dieron un BPM, por track (las filas con
-    # bpm en NULL son "consultada y no estaba": no se muestran).
+    # Every source that reported a BPM, per track (rows with bpm NULL are
+    # "consulted and didn't have it": those are not shown).
     cursor.execute("SELECT track_id, source, bpm, detail FROM bpm_sources WHERE bpm IS NOT NULL")
-    fuentes = {}
+    sources_by_track = {}
     for f in cursor.fetchall():
-        fuentes.setdefault(f["track_id"], []).append(
+        sources_by_track.setdefault(f["track_id"], []).append(
             {"source": f["source"], "bpm": f["bpm"], "detail": f["detail"]}
         )
 
@@ -460,20 +461,20 @@ def leer_datos():
                 "duration": t["duration_display"],
                 "bpm": t["bpm"],
                 "source": t["bpm_source"],
-                "sources": fuentes.get(t["id"], []),
+                "sources": sources_by_track.get(t["id"], []),
                 "alt": t["bpm_alt"],
                 "review": t["bpm_needs_review"] or 0,
                 "verified": t["bpm_verified"] or 0,
                 "key": t["key"],
-                "camelot": a_camelot(t["key"]),
+                "camelot": to_camelot(t["key"]),
                 "key_source": t["key_source"],
             }
             for t in cursor.fetchall()
         ]
         if tracks:
-            # La tapa la baja enrich_spotify.py; solo la anunciamos si
-            # el archivo existe de verdad, para no mostrar imágenes rotas.
-            tiene_tapa = bool(release["cover_path"]) and (
+            # The cover is downloaded by enrich_spotify.py; we only announce
+            # it if the file actually exists, to avoid showing broken images.
+            has_cover = bool(release["cover_path"]) and (
                 COVERS_DIR / f"{release['release_id']}.jpg"
             ).exists()
             releases.append(
@@ -482,7 +483,7 @@ def leer_datos():
                     "artist": release["artist"],
                     "title": release["title"],
                     "year": release["year"],
-                    "cover": tiene_tapa,
+                    "cover": has_cover,
                     "tracks": tracks,
                 }
             )
@@ -490,9 +491,9 @@ def leer_datos():
     return {"releases": releases}
 
 
-def guardar_bpm(track_id, bpm):
-    # Un BPM que escribiste vos cuenta como validado (escribirlo ES la
-    # validación manual); si lo borrás, obviamente deja de estarlo.
+def save_bpm(track_id, bpm):
+    # A BPM you typed yourself counts as validated (typing it IS the manual
+    # validation); if you clear it, it obviously stops being validated.
     conn = get_connection()
     conn.execute(
         "UPDATE tracks SET bpm = ?, bpm_source = ?,"
@@ -500,7 +501,7 @@ def guardar_bpm(track_id, bpm):
         (bpm, "manual" if bpm is not None else None, int(bpm is not None), track_id),
     )
     if bpm is not None:
-        registrar_bpm_fuente(conn, track_id, "manual", bpm)
+        record_bpm_source(conn, track_id, "manual", bpm)
     else:
         conn.execute(
             "DELETE FROM bpm_sources WHERE track_id = ? AND source = 'manual'",
@@ -510,14 +511,14 @@ def guardar_bpm(track_id, bpm):
     conn.close()
 
 
-def usar_fuente(track_id, fuente):
-    """El usuario eligió el valor de una fuente (click en la píldora):
-    ese BPM pasa a ser el del track y queda validado — elegirlo a mano
-    ES la confirmación. Devuelve el BPM, o None si la fuente no tenía."""
+def use_source(track_id, source):
+    """The user chose a source's value (click on the pill): that BPM becomes
+    the track's and is validated — choosing it by hand IS the confirmation.
+    Returns the BPM, or None if the source didn't have one."""
     conn = get_connection()
     row = conn.execute(
         "SELECT bpm FROM bpm_sources WHERE track_id = ? AND source = ? AND bpm IS NOT NULL",
-        (track_id, fuente),
+        (track_id, source),
     ).fetchone()
     if row is None:
         conn.close()
@@ -525,16 +526,16 @@ def usar_fuente(track_id, fuente):
     conn.execute(
         "UPDATE tracks SET bpm = ?, bpm_source = ?, bpm_alt = NULL,"
         " bpm_needs_review = 0, bpm_verified = 1 WHERE id = ?",
-        (row["bpm"], fuente, track_id),
+        (row["bpm"], source, track_id),
     )
     conn.commit()
     conn.close()
     return row["bpm"]
 
 
-def guardar_key(track_id, key):
-    """Una key que escribiste vos pisa lo que haya; si la borrás,
-    queda vacía (y el próximo enrich_beatport.py puede rellenarla)."""
+def save_key(track_id, key):
+    """A key you typed yourself overrides whatever was there; if you clear it,
+    it's left empty (and the next enrich_beatport.py can fill it in)."""
     conn = get_connection()
     conn.execute(
         "UPDATE tracks SET key = ?, key_source = ? WHERE id = ?",
@@ -544,9 +545,9 @@ def guardar_key(track_id, key):
     conn.close()
 
 
-def confirmar_bpm(track_id):
-    """El usuario revisó el track y el BPM guardado está bien: queda
-    validado (la fuente queda como estaba)."""
+def confirm_bpm(track_id):
+    """The user reviewed the track and the saved BPM is fine: it becomes
+    validated (the source stays as it was)."""
     conn = get_connection()
     conn.execute(
         "UPDATE tracks SET bpm_alt = NULL, bpm_needs_review = 0,"
@@ -559,74 +560,74 @@ def confirmar_bpm(track_id):
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
-        pass  # sin ruido en la terminal
+        pass  # no noise in the terminal
 
-    def responder(self, cuerpo, tipo="application/json"):
+    def respond(self, body, content_type="application/json"):
         self.send_response(200)
-        self.send_header("Content-Type", f"{tipo}; charset=utf-8")
+        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         self.end_headers()
-        self.wfile.write(cuerpo.encode("utf-8"))
+        self.wfile.write(body.encode("utf-8"))
 
     def do_GET(self):
         if self.path == "/":
-            self.responder(PAGINA, "text/html")
+            self.respond(PAGE, "text/html")
         elif self.path == "/api/data":
-            self.responder(json.dumps(leer_datos()))
+            self.respond(json.dumps(read_data()))
         elif re.fullmatch(r"/covers/\d+\.jpg", self.path):
-            # Sirve las tapas bajadas por enrich_spotify.py. El patrón
-            # solo acepta "/covers/<número>.jpg", así que no hay riesgo
-            # de que alguien pida otros archivos de la máquina.
-            archivo = COVERS_DIR / Path(self.path).name
-            if archivo.exists():
+            # Serves the covers downloaded by enrich_spotify.py. The pattern
+            # only accepts "/covers/<number>.jpg", so there's no risk of
+            # someone requesting other files on the machine.
+            file = COVERS_DIR / Path(self.path).name
+            if file.exists():
                 self.send_response(200)
                 self.send_header("Content-Type", "image/jpeg")
                 self.send_header("Cache-Control", "max-age=86400")
                 self.end_headers()
-                self.wfile.write(archivo.read_bytes())
+                self.wfile.write(file.read_bytes())
             else:
                 self.send_error(404)
         else:
             self.send_error(404)
 
     def do_POST(self):
-        if self.path not in ("/api/bpm", "/api/confirmar", "/api/key", "/api/fuente"):
+        if self.path not in ("/api/bpm", "/api/confirm", "/api/key", "/api/source"):
             self.send_error(404)
             return
-        largo = int(self.headers.get("Content-Length", 0))
+        length = int(self.headers.get("Content-Length", 0))
         try:
-            pedido = json.loads(self.rfile.read(largo))
-            track_id = int(pedido["id"])
+            request = json.loads(self.rfile.read(length))
+            track_id = int(request["id"])
         except (ValueError, KeyError, json.JSONDecodeError):
             self.send_error(400)
             return
 
-        if self.path == "/api/fuente":
-            # Adoptar el BPM de una fuente (y validarlo, porque lo
-            # elegiste vos mirando todas las opciones).
-            fuente = str(pedido.get("source") or "")
-            bpm = usar_fuente(track_id, fuente)
+        if self.path == "/api/source":
+            # Adopt a source's BPM (and validate it, because you chose it
+            # looking at all the options).
+            source = str(request.get("source") or "")
+            bpm = use_source(track_id, source)
             if bpm is None:
-                self.send_error(400)  # esa fuente no tiene BPM para este track
+                self.send_error(400)  # that source has no BPM for this track
                 return
-            self.responder(json.dumps({"ok": True, "bpm": bpm}))
+            self.respond(json.dumps({"ok": True, "bpm": bpm}))
             return
 
         if self.path == "/api/key":
-            # Acepta "8A", "Am", "f# minor"...; vacío = borrarla.
-            texto = str(pedido.get("key") or "").strip()
-            key = normalizar_key(texto) if texto else None
-            if texto and key is None:
-                self.send_error(400)  # no se entendió la tonalidad
+            # Accepts "8A", "Am", "f# minor"...; empty = clear it.
+            text = str(request.get("key") or "").strip()
+            key = normalize_key(text) if text else None
+            if text and key is None:
+                self.send_error(400)  # the key wasn't understood
                 return
-            guardar_key(track_id, key)
-            self.responder(json.dumps({"ok": True, "key": key, "camelot": a_camelot(key)}))
+            save_key(track_id, key)
+            self.respond(json.dumps({"ok": True, "key": key, "camelot": to_camelot(key)}))
             return
 
-        if self.path == "/api/confirmar":
-            confirmar_bpm(track_id)
+        if self.path == "/api/confirm":
+            confirm_bpm(track_id)
         else:
             try:
-                bpm = pedido.get("bpm")
+                bpm = request.get("bpm")
                 if bpm is not None:
                     bpm = float(bpm)
                     if not 30 <= bpm <= 300:
@@ -634,31 +635,31 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self.send_error(400)
                 return
-            guardar_bpm(track_id, bpm)
-        self.responder(json.dumps({"ok": True}))
+            save_bpm(track_id, bpm)
+        self.respond(json.dumps({"ok": True}))
 
 
 def main():
     init_db()
     try:
-        servidor = ThreadingHTTPServer(("127.0.0.1", PUERTO), Handler)
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     except OSError:
         print(
-            f"El puerto {PUERTO} ya está ocupado: seguramente el editor ya\n"
-            f"está abierto en otra terminal (o quedó corriendo de antes).\n"
-            f"Entrá a http://localhost:{PUERTO} — y si acabás de actualizar\n"
-            f"el proyecto, cerrá aquel con Ctrl+C y volvé a correr este."
+            f"Port {PORT} is already in use: the editor is probably already\n"
+            f"open in another terminal (or was left running from before).\n"
+            f"Go to http://localhost:{PORT} — and if you just updated the\n"
+            f"project, close that one with Ctrl+C and run this again."
         )
         return
-    url = f"http://localhost:{PUERTO}"
-    print(f"Editor de BPM abierto en {url}")
-    print("(si no se abrió solo, entrá a esa dirección en el navegador)")
-    print("Para terminar: Ctrl+C\n")
+    url = f"http://localhost:{PORT}"
+    print(f"BPM editor open at {url}")
+    print("(if it didn't open on its own, go to that address in your browser)")
+    print("To stop: Ctrl+C\n")
     threading.Timer(0.6, webbrowser.open, [url]).start()
     try:
-        servidor.serve_forever()
+        server.serve_forever()
     except KeyboardInterrupt:
-        print("\nListo. Todos los cambios ya estaban guardados.")
+        print("\nDone. All changes were already saved.")
 
 
 if __name__ == "__main__":

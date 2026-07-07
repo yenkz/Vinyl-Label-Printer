@@ -20,7 +20,7 @@ Images are saved in the labels_output/ folder, with names like
 How to run it:
     python render_labels.py              # generate ALL labels
     python render_labels.py aphex        # only records containing "aphex"
-    python render_labels.py aphex --ver  # also open them in Preview
+    python render_labels.py aphex --view # also open them in Preview
 """
 
 import re
@@ -31,7 +31,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 import config
-from comunes import a_camelot
+from common import to_camelot
 from db import get_connection, init_db
 
 OUTPUT_DIR = Path(__file__).parent / config.OUTPUT_DIR
@@ -77,10 +77,10 @@ def load_cover(release):
     if not path.exists():
         return None
     try:
-        tapa = Image.open(ruta).resize((COVER_PX, COVER_PX)).convert("L").convert("1")
+        cover = Image.open(path).resize((COVER_PX, COVER_PX)).convert("L").convert("1")
     except OSError:
         return None
-    return tapa.convert("RGB")
+    return cover.convert("RGB")
 
 
 def truncate_text(draw, text, font, max_width):
@@ -100,92 +100,92 @@ def file_name(release):
     return f"{base[:120]} ({release['release_id']}).png"
 
 
-def renderizar_disco(release, tracks, fuente_titulo, fuente_texto, fuente_bpm, fuente_meta):
-    tapa = cargar_tapa(release)
-    sello = " · ".join(filter(None, (release["sello"], release["catno"])))
-    fecha = formatear_fecha(release)
+def render_release(release, tracks, font_title, font_text, font_bpm, font_meta):
+    cover = load_cover(release)
+    label = " · ".join(filter(None, (release["label"], release["catno"])))
+    date = format_date(release)
 
-    # --- Encabezado: tapa a la izquierda (si hay) y a su lado el
-    # artista (negrita), el disco, el sello y la fecha de edición ---
-    texto_x = MARGIN + COVER_PX + 16 if tapa else MARGIN
-    y_texto = 14 if tapa else 6
-    y = y_texto + LINEA_HEADER * 2
-    if sello:
-        y += LINEA_META
-    if fecha:
-        y += LINEA_META
-    header_height = max(y + 12, COVER_PX + 24 if tapa else 0)
+    # --- Header: cover on the left (if any) and next to it the artist
+    # (bold), the record, the label, and the release date ---
+    text_x = MARGIN + COVER_PX + 16 if cover else MARGIN
+    text_y = 14 if cover else 6
+    y = text_y + HEADER_LINE * 2
+    if label:
+        y += META_LINE
+    if date:
+        y += META_LINE
+    header_height = max(y + 12, COVER_PX + 24 if cover else 0)
 
-    alto_total = header_height + FILA_TITULOS + ROW_HEIGHT * len(tracks) + FOOTER_MARGIN
-    img = Image.new("RGB", (config.LABEL_WIDTH_PX, alto_total), "white")
+    total_height = header_height + TITLES_ROW + ROW_HEIGHT * len(tracks) + FOOTER_MARGIN
+    img = Image.new("RGB", (config.LABEL_WIDTH_PX, total_height), "white")
     draw = ImageDraw.Draw(img)
 
-    if tapa:
-        img.paste(tapa, (MARGIN, 12))
-    ancho_util = config.LABEL_WIDTH_PX - texto_x - MARGIN
+    if cover:
+        img.paste(cover, (MARGIN, 12))
+    usable_width = config.LABEL_WIDTH_PX - text_x - MARGIN
 
-    y = y_texto
-    artista = truncar_texto(draw, release["artist"], fuente_titulo, ancho_util)
-    draw.text((texto_x, y), artista, font=fuente_titulo, fill="black")
-    y += LINEA_HEADER
-    disco = truncar_texto(draw, release["title"], fuente_texto, ancho_util)
-    draw.text((texto_x, y), disco, font=fuente_texto, fill="black")
-    y += LINEA_HEADER
-    if sello:
-        draw.text((texto_x, y), truncar_texto(draw, sello, fuente_meta, ancho_util), font=fuente_meta, fill="black")
-        y += LINEA_META
-    if fecha:
-        draw.text((texto_x, y), fecha, font=fuente_meta, fill="black")
+    y = text_y
+    artist_text = truncate_text(draw, release["artist"], font_title, usable_width)
+    draw.text((text_x, y), artist_text, font=font_title, fill="black")
+    y += HEADER_LINE
+    release_text = truncate_text(draw, release["title"], font_text, usable_width)
+    draw.text((text_x, y), release_text, font=font_text, fill="black")
+    y += HEADER_LINE
+    if label:
+        draw.text((text_x, y), truncate_text(draw, label, font_meta, usable_width), font=font_meta, fill="black")
+        y += META_LINE
+    if date:
+        draw.text((text_x, y), date, font=font_meta, fill="black")
     draw.line(
         [(MARGIN, header_height - 8), (config.LABEL_WIDTH_PX - MARGIN, header_height - 8)],
         fill="black",
         width=2,
     )
 
-    # --- Columnas: posición | título del track | duración | BPM | key ---
-    col_posicion_x = MARGIN
-    col_titulo_x = MARGIN + 60
-    col_duracion_x = config.LABEL_WIDTH_PX - 246
+    # --- Columns: position | track title | duration | BPM | key ---
+    col_position_x = MARGIN
+    col_title_x = MARGIN + 60
+    col_duration_x = config.LABEL_WIDTH_PX - 246
     col_bpm_x = config.LABEL_WIDTH_PX - 156
     col_key_x = config.LABEL_WIDTH_PX - 76
 
-    # Nombres de las columnas, chiquitos, debajo de la línea. KEY solo
-    # si algún track la tiene (en discos no electrónicos sería ruido).
-    draw.text((col_duracion_x, header_height + 2), "DUR", font=fuente_meta, fill="black")
-    draw.text((col_bpm_x, header_height + 2), "BPM", font=fuente_meta, fill="black")
+    # Column names, small, below the line. KEY only if some track has it
+    # (on non-electronic records it would just be noise).
+    draw.text((col_duration_x, header_height + 2), "DUR", font=font_meta, fill="black")
+    draw.text((col_bpm_x, header_height + 2), "BPM", font=font_meta, fill="black")
     if any(t["key"] for t in tracks):
-        draw.text((col_key_x, header_height + 2), "KEY", font=fuente_meta, fill="black")
+        draw.text((col_key_x, header_height + 2), "KEY", font=font_meta, fill="black")
 
-    y = header_height + FILA_TITULOS
+    y = header_height + TITLES_ROW
     for track in tracks:
-        draw.text((col_posicion_x, y + 8), track["position"] or "", font=fuente_texto, fill="black")
+        draw.text((col_position_x, y + 8), track["position"] or "", font=font_text, fill="black")
 
-        titulo_max_ancho = col_duracion_x - col_titulo_x - 10
-        # En discos "Various" cada track puede tener su propio artista
-        # (Discogs lo guarda por track); si lo tenemos, lo mostramos
-        # antes del título para no perder esa info en la etiqueta.
-        texto_track = track["title"] or ""
+        title_max_width = col_duration_x - col_title_x - 10
+        # On "Various" records each track can have its own artist (Discogs
+        # stores it per track); if we have it, we show it before the title
+        # so that info isn't lost on the label.
+        track_text = track["title"] or ""
         if track["artist"]:
-            texto_track = f"{track['artist']} – {texto_track}"
-        titulo_track = truncar_texto(draw, texto_track, fuente_texto, titulo_max_ancho)
-        draw.text((col_titulo_x, y + 8), titulo_track, font=fuente_texto, fill="black")
+            track_text = f"{track['artist']} – {track_text}"
+        track_title = truncate_text(draw, track_text, font_text, title_max_width)
+        draw.text((col_title_x, y + 8), track_title, font=font_text, fill="black")
 
-        draw.text((col_duracion_x, y + 8), track["duration_display"] or "--:--", font=fuente_texto, fill="black")
+        draw.text((col_duration_x, y + 8), track["duration_display"] or "--:--", font=font_text, fill="black")
 
         if track["bpm"]:
-            bpm_texto = str(round(track["bpm"]))
-            # El asterisco marca los BPM dudosos (los detectores no se
-            # pusieron de acuerdo y todavía no lo confirmaste).
+            bpm_text = str(round(track["bpm"]))
+            # The asterisk marks doubtful BPM (the detectors didn't agree
+            # and you haven't confirmed it yet).
             if track["bpm_needs_review"]:
-                bpm_texto += "*"
+                bpm_text += "*"
         else:
-            bpm_texto = "?"
-        draw.text((col_bpm_x, y + 8), bpm_texto, font=fuente_bpm, fill="black")
+            bpm_text = "?"
+        draw.text((col_bpm_x, y + 8), bpm_text, font=font_bpm, fill="black")
 
-        # La key en Camelot ("8A"). Sin "?" cuando falta: la mayoría
-        # de los discos no electrónicos no la van a tener nunca.
+        # The key in Camelot ("8A"). No "?" when missing: most non-electronic
+        # records will never have it.
         if track["key"]:
-            draw.text((col_key_x, y + 8), a_camelot(track["key"]), font=fuente_bpm, fill="black")
+            draw.text((col_key_x, y + 8), to_camelot(track["key"]), font=font_bpm, fill="black")
 
         y += ROW_HEIGHT
 
@@ -193,32 +193,32 @@ def renderizar_disco(release, tracks, fuente_titulo, fuente_texto, fuente_bpm, f
 
 
 def main():
-    argumentos = sys.argv[1:]
-    abrir_preview = "--ver" in argumentos
-    filtro = next((a.lower() for a in argumentos if not a.startswith("--")), "")
+    arguments = sys.argv[1:]
+    open_preview = "--view" in arguments
+    filter_text = next((a.lower() for a in arguments if not a.startswith("--")), "")
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    init_db()  # por si todavía no corriste ningún otro paso
+    init_db()  # in case you haven't run any other step yet
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM releases ORDER BY artist, title")
     releases = cursor.fetchall()
 
     if not releases:
-        print("Tu colección está vacía. Corré primero: python fetch_discogs.py")
+        print("Your collection is empty. Run first: python fetch_discogs.py")
         return
 
-    if filtro:
-        releases = [r for r in releases if filtro in f"{r['artist']} {r['title']}".lower()]
+    if filter_text:
+        releases = [r for r in releases if filter_text in f"{r['artist']} {r['title']}".lower()]
         if not releases:
-            print(f"Ningún disco de tu colección contiene '{filtro}'.")
+            print(f"No record in your collection contains '{filter_text}'.")
             return
 
-    fuente_titulo, fuente_texto, fuente_bpm, fuente_meta = cargar_fuentes()
+    font_title, font_text, font_bpm, font_meta = load_fonts()
 
-    generados = 0
-    rutas_generadas = []
+    generated = 0
+    generated_paths = []
     for release in releases:
         cursor.execute(
             "SELECT * FROM tracks WHERE release_id = ? ORDER BY id",
@@ -228,24 +228,24 @@ def main():
         if not tracks:
             continue
 
-        img = renderizar_disco(release, tracks, fuente_titulo, fuente_texto, fuente_bpm, fuente_meta)
+        img = render_release(release, tracks, font_title, font_text, font_bpm, font_meta)
 
-        nombre = nombre_de_archivo(release)
-        img.save(OUTPUT_DIR / nombre)
-        rutas_generadas.append(OUTPUT_DIR / nombre)
-        generados += 1
-        print(f"Generado: {nombre}")
+        name = file_name(release)
+        img.save(OUTPUT_DIR / name)
+        generated_paths.append(OUTPUT_DIR / name)
+        generated += 1
+        print(f"Generated: {name}")
 
     conn.close()
-    print(f"\nListo. {generados} etiquetas generadas en {OUTPUT_DIR}/")
+    print(f"\nDone. {generated} labels generated in {OUTPUT_DIR}/")
 
-    if abrir_preview and rutas_generadas:
-        # Abre las imágenes en Vista Previa (Mac) para chequearlas
-        # antes de gastar etiqueta.
-        subprocess.run(["open", *map(str, rutas_generadas)])
+    if open_preview and generated_paths:
+        # Open the images in Preview (Mac) to check them before
+        # wasting a label.
+        subprocess.run(["open", *map(str, generated_paths)])
 
-    print("Próximo paso: python print_labels.py --prueba  (para ver qué saldría)")
-    print("           o: python print_labels.py           (para imprimir)")
+    print("Next step: python print_labels.py --test  (to see what would print)")
+    print("        or: python print_labels.py         (to print)")
 
 
 if __name__ == "__main__":
