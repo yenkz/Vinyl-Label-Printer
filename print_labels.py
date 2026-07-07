@@ -34,7 +34,7 @@ from brother_ql.backends.helpers import discover, send
 import config
 
 OUTPUT_DIR = Path(__file__).parent / config.OUTPUT_DIR
-IMPRESAS_DIR = OUTPUT_DIR / "impresas"
+PRINTED_DIR = OUTPUT_DIR / "printed"
 
 
 def find_printer():
@@ -94,7 +94,7 @@ def main():
             print("Cancelled. Nothing printed.")
             return
 
-        IMPRESAS_DIR.mkdir(exist_ok=True)
+        PRINTED_DIR.mkdir(exist_ok=True)
 
     printed = 0
     total_length_mm = 0
@@ -140,7 +140,7 @@ def main():
 
         # If we get here, it worked: move it to printed/ so it doesn't
         # get printed again next time.
-        path.rename(IMPRESAS_DIR / path.name)
+        path.rename(PRINTED_DIR / path.name)
         printed += 1
 
     if test_mode:

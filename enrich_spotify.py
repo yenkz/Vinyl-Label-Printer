@@ -26,7 +26,7 @@ from pathlib import Path
 import requests
 
 import config
-from comunes import bajar_tapa, se_parecen
+from common import download_cover, looks_similar
 from db import get_connection, init_db
 
 SPOTIFY_ACCOUNTS = "https://accounts.spotify.com/api/token"
@@ -66,12 +66,12 @@ def search_album_spotify(headers, artist, title):
         return None
 
     for album in candidates:
-        if not se_parecen(album["name"], title):
+        if not looks_similar(album["name"], title):
             continue
         if is_various:
             return album
         names = [a["name"] for a in album.get("artists", [])]
-        if any(se_parecen(n, artist, umbral=0.8) for n in names):
+        if any(looks_similar(n, artist, umbral=0.8) for n in names):
             return album
     return None
 
@@ -148,7 +148,7 @@ def main():
 
         if album:
             if missing_cover and album.get("images"):
-                path = bajar_tapa(album["images"][0]["url"], rid)
+                path = download_cover(album["images"][0]["url"], rid)
                 if path:
                     cursor.execute("UPDATE releases SET cover_path = ? WHERE release_id = ?", (path, rid))
                     stats["covers"] += 1
@@ -158,7 +158,7 @@ def main():
                 spotify_tracks = tracks_from_spotify_album(headers, album["id"])
                 durations = isrcs = 0
                 for t in tracks_db:
-                    match = next((s for s in spotify_tracks if se_parecen(s["title"], t["title"])), None)
+                    match = next((s for s in spotify_tracks if looks_similar(s["title"], t["title"])), None)
                     if not match:
                         continue
                     if not t["duration_display"] and match["duration"]:

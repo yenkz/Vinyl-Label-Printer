@@ -27,6 +27,16 @@ GETSONGBPM_API_KEY = os.environ.get("GETSONGBPM_API_KEY", "")
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 
+# OPTIONAL. Soulseek download (download_music.py), via a local slskd
+# daemon. See the README section "Download digital copies (Soulseek)".
+SLSKD_HOST = os.environ.get("SLSKD_HOST", "http://localhost:5030")
+SLSKD_API_KEY = os.environ.get("SLSKD_API_KEY", "")
+SLSKD_URL_BASE = os.environ.get("SLSKD_URL_BASE", "/")
+# Where slskd drops finished downloads (must match slskd's own "downloads"
+# directory) and where we build the organized library.
+SLSKD_DOWNLOADS_DIR = os.environ.get("SLSKD_DOWNLOADS_DIR", "~/Music/Vinyl/_incoming")
+MUSIC_DIR = os.environ.get("MUSIC_DIR", "~/Music/Vinyl")
+
 # Your "application" identifier with Discogs. You can leave it as is,
 # no registration required.
 DISCOGS_USER_AGENT = "VinylLabelPrinter/1.0"
@@ -58,7 +68,7 @@ PRINTER_IDENTIFIER = None
 # "chrome", "safari", "firefox", "brave" or "edge".
 # (With Safari, Terminal may ask for "Full Disk Access" in System Settings.)
 # Empty = disabled.
-YOUTUBE_COOKIES_NAVEGADOR = ""
+YOUTUBE_COOKIES_BROWSER = ""
 
 # =========================================================
 # 4) LABELS

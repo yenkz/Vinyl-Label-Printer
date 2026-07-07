@@ -8,21 +8,29 @@
 #                      tracks (make beatport n=5 to test)
 #   make bandcamp   -> step 3: missing covers/durations (Bandcamp)
 #   make spotify    -> step 4: final fallback (cover, durations, ISRC)
-#   make analizar   -> step 5: measures what Beatport didn't have, from
-#                      YouTube (make analizar n=5 to test with 5)
+#   make analyze    -> step 5: measures what Beatport didn't have, from
+#                      YouTube (make analyze n=5 to test with 5)
 #   make bpm        -> step 6: last resort for BPM (Deezer, optional)
-#   make auditar    -> re-checks measurements from old version
-#                      (one time only; make auditar n=5 to test)
-#   make editar     -> step 7: BPM and key editor and VALIDATOR (you put
+#   make audit      -> re-checks measurements from old version
+#                      (one time only; make audit n=5 to test)
+#   make edit       -> step 7: BPM and key editor and VALIDATOR (you put
 #                      the ✓ there, seeing all sources)
 #   make render     -> step 8: generates all labels
-#   make prueba     -> step 9 in test mode (no printer)
+#   make test       -> step 9 in test mode (no printer)
 #   make print      -> step 9: prints pending labels
 #
-# Steps with filter accept d=text (d for "disco"/record):
+# Optional, separate from the labels: download a digital copy of the
+# collection from Soulseek (needs the slskd daemon, see the README).
+#   make slskd      -> start the slskd daemon (keep it open in its own
+#                      terminal)
+#   make download   -> download everything still missing into ~/Music/Vinyl
+#                      (make download d=aphex for one record; add force=1
+#                      to re-download)
+#
+# Steps with filter accept d=text (d for record):
 #   make render d=aphex   -> only records containing "aphex"
-#   make ver d=aphex      -> same + opens them in Preview
-#   make prueba d=aphex
+#   make view d=aphex     -> same + opens them in Preview
+#   make test d=aphex
 #   make print d=aphex
 #
 # And to do everything at once (fetch + beatport + bandcamp + spotify +
@@ -35,7 +43,11 @@ UV := $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
 
 PYTHON := .venv/bin/python
 
-.PHONY: help setup fetch beatport bandcamp spotify bpm analizar auditar editar export import render ver prueba print todo
+.PHONY: help setup fetch beatport bandcamp spotify bpm analyze audit edit export import render view test print todo slskd download
+
+# slskd (the Soulseek daemon) is usually installed to ~/.local/bin or via a
+# downloaded binary; we look for it on PATH first.
+SLSKD := $(shell command -v slskd 2>/dev/null)
 
 help:
 	@awk '/^#/ { sub(/^# ?/, ""); print; next } { exit }' Makefile
@@ -62,13 +74,13 @@ spotify:
 bpm:
 	$(PYTHON) enrich_bpm.py
 
-analizar:
+analyze:
 	$(PYTHON) analyze_bpm.py $(n)
 
-auditar:
+audit:
 	$(PYTHON) audit_bpm.py $(n)
 
-editar:
+edit:
 	$(PYTHON) edit_bpm.py
 
 # (fallback: the old CSV workflow still works with export/import)
@@ -81,14 +93,27 @@ import:
 render:
 	$(PYTHON) render_labels.py $(d)
 
-ver:
-	$(PYTHON) render_labels.py $(d) --ver
+view:
+	$(PYTHON) render_labels.py $(d) --view
 
-prueba:
-	$(PYTHON) print_labels.py $(d) --prueba
+test:
+	$(PYTHON) print_labels.py $(d) --test
 
 print:
 	$(PYTHON) print_labels.py $(d)
 
 # make todo -> runs all automatic steps at once (printing is manual)
 todo: fetch beatport bandcamp spotify bpm render
+
+# Start the Soulseek daemon. Keep this running in its own terminal while
+# you run "make download" in another. (Download/install slskd first — see
+# the README section "Download digital copies (Soulseek)".)
+slskd:
+	@test -n "$(SLSKD)" || { echo "slskd not found. Install it first — see the README."; exit 1; }
+	"$(SLSKD)"
+
+# make download          -> everything still missing
+# make download d=aphex  -> only records matching "aphex"
+# make download force=1  -> re-download even what's already there
+download:
+	$(PYTHON) download_music.py $(d) $(if $(force),--force,)

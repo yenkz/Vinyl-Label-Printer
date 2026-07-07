@@ -39,15 +39,15 @@ import time
 
 import requests
 
-from comunes import (
-    a_camelot,
-    acomodar_al_rango,
-    normalizar,
-    normalizar_key,
-    parsear_duracion,
-    se_parecen,
+from common import (
+    to_camelot,
+    fit_to_range,
+    normalize,
+    normalize_key,
+    parse_duration,
+    looks_similar,
 )
-from db import get_connection, init_db, registrar_bpm_fuente
+from db import get_connection, init_db, record_bpm_source
 
 BEATPORT_API = "https://api.beatport.com/v4"
 BEATPORT_EMBED = "https://embed.beatport.com/"
@@ -173,12 +173,12 @@ def search_beatport(artist, title, target_duration):
         # "Original Mix" adds nothing; any other mix is part of the
         # title ("Concrete Jungle (Juaan Remix)").
         full_title = name if mix.lower() in ("", "original mix", "original") else f"{name} ({mix})"
-        if not se_parecen(full_title, title):
+        if not looks_similar(full_title, title):
             continue
 
         if not is_various:
             names = [a.get("name", "") for a in track.get("artists") or []]
-            if not any(se_parecen(n, artist, umbral=0.8) for n in names):
+            if not any(looks_similar(n, artist, umbral=0.8) for n in names):
                 continue
 
         track_duration = (track.get("length_ms") or 0) / 1000
@@ -188,7 +188,7 @@ def search_beatport(artist, title, target_duration):
             if difference > tolerance:
                 continue
             best.append((difference, track))
-        elif normalizar(full_title) == normalizar(title):
+        elif normalize(full_title) == normalize(title):
             # Without duration to compare, we only accept the exact title match
             # (otherwise, "Song" vs "Song (Remix)" picks any, and the remix
             # has different BPM and key).
@@ -254,7 +254,7 @@ def main():
 
         try:
             candidate = search_beatport(
-                artist, row["title"], parsear_duracion(row["duration_display"])
+                artist, row["title"], parse_duration(row["duration_display"])
             )
         except RuntimeError as e:
             print(f"\nStopping here: {e}. What was saved so far is preserved.")
@@ -286,10 +286,10 @@ def main():
             # (67 for a 134 BPM track): we adjust it to your collection's
             # range, keeping the original number noted.
             card_bpm = float(card_bpm)
-            beatport_bpm = acomodar_al_rango(card_bpm)
+            beatport_bpm = fit_to_range(card_bpm)
             if beatport_bpm != card_bpm:
                 detail = f"{detail} (sheet says {card_bpm:g} BPM)"
-            registrar_bpm_fuente(conn, row["id"], "beatport", beatport_bpm, detail)
+            record_bpm_source(conn, row["id"], "beatport", beatport_bpm, detail)
             if row["bpm"] is None:
                 # No previous BPM: Beatport's becomes the main one,
                 # but NOT validated — you put the checkmark in the editor.
@@ -352,14 +352,14 @@ def main():
             )
 
         if row["key"] is None:
-            key = normalizar_key((candidate.get("key") or {}).get("name"))
+            key = normalize_key((candidate.get("key") or {}).get("name"))
             if key:
                 cursor.execute(
                     "UPDATE tracks SET key = ?, key_source = 'beatport' WHERE id = ?",
                     (key, row["id"]),
                 )
                 stats["keys"] += 1
-                updates.append(f"key {key} ({a_camelot(key)})")
+                updates.append(f"key {key} ({to_camelot(key)})")
 
         if not row["isrc"] and candidate.get("isrc"):
             cursor.execute(

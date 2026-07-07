@@ -28,7 +28,7 @@ from pathlib import Path
 
 import requests
 
-from comunes import bajar_tapa, formatear_duracion, se_parecen
+from common import download_cover, format_duration, looks_similar
 from db import get_connection, init_db
 
 # Public API (no key) used by bandcamp.com's search engine.
@@ -62,12 +62,12 @@ def search_album_bandcamp(artist, title):
     for r in results:
         if r.get("type") != "a" or not r.get("item_url_path"):
             continue
-        if not se_parecen(r.get("name", ""), title):
+        if not looks_similar(r.get("name", ""), title):
             continue
         # Bandcamp's "band_name" is sometimes the label, not the artist;
         # so we check it, but only if it's not a compilation (where artist
         # isn't useful for comparison).
-        if not is_various and not se_parecen(r.get("band_name", ""), artist, umbral=0.8):
+        if not is_various and not looks_similar(r.get("band_name", ""), artist, umbral=0.8):
             continue
         return r
     return None
@@ -129,13 +129,13 @@ def main():
                     if t["duration_display"]:
                         continue
                     match = next(
-                        (b for b in trackinfo if b.get("duration") and se_parecen(b.get("title", ""), t["title"])),
+                        (b for b in trackinfo if b.get("duration") and looks_similar(b.get("title", ""), t["title"])),
                         None,
                     )
                     if match:
                         cursor.execute(
                             "UPDATE tracks SET duration_display = ? WHERE id = ?",
-                            (formatear_duracion(match["duration"]), t["id"]),
+                            (format_duration(match["duration"]), t["id"]),
                         )
                         durations += 1
                 stats["durations"] += durations
@@ -143,7 +143,7 @@ def main():
                     updates.append(f"{durations} durations")
 
             if missing_cover and cover_url:
-                path = bajar_tapa(cover_url, rid)
+                path = download_cover(cover_url, rid)
                 if path:
                     cursor.execute("UPDATE releases SET cover_path = ? WHERE release_id = ?", (path, rid))
                     stats["covers"] += 1

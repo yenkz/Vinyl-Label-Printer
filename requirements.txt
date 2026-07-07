@@ -8,3 +8,5 @@ yt-dlp
 librosa
 deeprhythm
 imageio-ffmpeg
+slskd-api
+mutagen

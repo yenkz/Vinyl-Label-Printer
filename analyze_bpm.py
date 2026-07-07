@@ -40,7 +40,7 @@ one click away in the editor.
 
 Since tempo detectors sometimes return double or half, the result is adjusted
 to the typical club music range (88–176). If your collection is different
-(hip hop, ambient...), adjust BPM_MINIMO / BPM_MAXIMO in comunes.py.
+(hip hop, ambient...), adjust BPM_MIN / BPM_MAX in common.py.
 
 How to run it:
     python analyze_bpm.py        # analyze all that are missing
@@ -64,11 +64,11 @@ import requests
 from yt_dlp import YoutubeDL
 
 import config
-from comunes import acomodar_al_rango, formatear_duracion, parsear_duracion
-from db import get_connection, init_db, registrar_bpm_fuente
+from common import fit_to_range, format_duration, parse_duration
+from db import get_connection, init_db, record_bpm_source
 
 # If the two detectors differ by more than this (already adjusted to
-# comunes.py range), the track is marked for manual review.
+# common.py range), the track is marked for manual review.
 TOLERANCE_BPM = 2.5
 
 # How much the video duration can differ from Discogs for it to be
@@ -96,8 +96,8 @@ def base_options():
         "no_warnings": True,
         "noplaylist": True,
     }
-    if config.YOUTUBE_COOKIES_NAVEGADOR:
-        ops["cookiesfrombrowser"] = (config.YOUTUBE_COOKIES_NAVEGADOR,)
+    if config.YOUTUBE_COOKIES_BROWSER:
+        ops["cookiesfrombrowser"] = (config.YOUTUBE_COOKIES_BROWSER,)
     return ops
 
 
@@ -374,14 +374,14 @@ def measure_bpm(audio_path, video_duration):
 
     # Detector 1: deeprhythm (note: needs WAV, doesn't read webm/m4a).
     try:
-        bpm_dr = acomodar_al_rango(float(deeprhythm_model().predict(str(wav))))
+        bpm_dr = fit_to_range(float(deeprhythm_model().predict(str(wav))))
     except Exception:
         bpm_dr = None
 
     # Detector 2: librosa.
     y, sr = librosa.load(str(wav), sr=None, mono=True)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    bpm_lr = acomodar_al_rango(float(np.atleast_1d(tempo)[0]))
+    bpm_lr = fit_to_range(float(np.atleast_1d(tempo)[0]))
 
     if bpm_dr is None and bpm_lr is None:
         return None, None, False
@@ -488,8 +488,8 @@ def analyze_track(artist, title, target_duration, tmpdir, catno=None):
             reasons.append(f"{name}: couldn't measure clear tempo")
             continue
         detail = (f"{video.get('title', '')} [{name}; note: lasts "
-                  f"{formatear_duracion(video['duration'])} but Discogs says "
-                  f"{formatear_duracion(target_duration)} — different edition?]")
+                  f"{format_duration(video['duration'])} but Discogs says "
+                  f"{format_duration(target_duration)} — different edition?]")
         return bpm, alternative, True, detail
 
     return None, None, False, " | ".join(reasons)
@@ -534,7 +534,7 @@ def main():
             try:
                 bpm, alternative, doubt, detail = analyze_track(
                     row["artist"], row["title"],
-                    parsear_duracion(row["duration_display"]), tmpdir,
+                    parse_duration(row["duration_display"]), tmpdir,
                     row["catno"],
                 )
             except KeyboardInterrupt:
@@ -550,7 +550,7 @@ def main():
                     " bpm_alt = ?, bpm_needs_review = ?, bpm_verified = 0 WHERE id = ?",
                     (bpm, alternative, int(doubt), row["id"]),
                 )
-                registrar_bpm_fuente(conn, row["id"], "youtube", bpm, detail)
+                record_bpm_source(conn, row["id"], "youtube", bpm, detail)
                 conn.commit()
                 found += 1
                 doubtful += int(doubt)
