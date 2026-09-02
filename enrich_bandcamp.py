@@ -14,22 +14,24 @@ exact durations and cover. Bandcamp doesn't publish BPM or tonality: that's what
 the other steps are for.
 
 How to run it:
-    python enrich_bandcamp.py
+    python enrich_bandcamp.py          # newly imported records only
+    python enrich_bandcamp.py --all    # retry the whole collection
 
-You can run it as many times as you like: records that are already complete
-are skipped without making requests.
+Normal runs skip records already attempted, including old misses. Use --all
+when you want to try incomplete records again.
 """
 
 import html
 import json
 import re
+import sys
 import time
 from pathlib import Path
 
 import requests
 
 from common import download_cover, format_duration, looks_similar
-from db import get_connection, init_db
+from db import get_connection, init_db, mark_workflow_step
 
 # Public API (no key) used by bandcamp.com's search engine.
 BANDCAMP_SEARCH_API = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
@@ -67,7 +69,7 @@ def search_album_bandcamp(artist, title):
         # Bandcamp's "band_name" is sometimes the label, not the artist;
         # so we check it, but only if it's not a compilation (where artist
         # isn't useful for comparison).
-        if not is_various and not looks_similar(r.get("band_name", ""), artist, umbral=0.8):
+        if not is_various and not looks_similar(r.get("band_name", ""), artist, threshold=0.8):
             continue
         return r
     return None
@@ -95,13 +97,29 @@ def read_album_page(url):
 
 
 def main():
+    process_all = "--all" in sys.argv[1:]
+    if any(arg != "--all" for arg in sys.argv[1:]):
+        print(__doc__)
+        return
+
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM releases ORDER BY artist, title")
+    cursor.execute(
+        "SELECT * FROM releases WHERE ? OR NOT EXISTS ("
+        " SELECT 1 FROM workflow_steps"
+        " WHERE workflow_steps.release_id = releases.release_id"
+        "   AND step = 'bandcamp')"
+        " ORDER BY artist, title",
+        (int(process_all),),
+    )
     releases = cursor.fetchall()
-    print(f"Records in collection: {len(releases)}\n")
+    print(f"Records to check on Bandcamp: {len(releases)}\n")
+    if not releases:
+        conn.close()
+        print("Nothing new to check. Use --all to revisit the whole collection.")
+        return
 
     stats = {"covers": 0, "durations": 0, "no_bandcamp": 0}
     for i, release in enumerate(releases, start=1):
@@ -112,6 +130,8 @@ def main():
         missing_cover = not release["cover_path"] or not (Path(__file__).parent / release["cover_path"]).exists()
         missing_durations = any(not t["duration_display"] for t in tracks_db)
         if not missing_cover and not missing_durations:
+            mark_workflow_step(conn, rid, "bandcamp")
+            conn.commit()
             continue  # already complete, don't waste requests
 
         label = f"[{i}/{len(releases)}] {release['artist']} - {release['title']}"
@@ -152,6 +172,7 @@ def main():
             stats["no_bandcamp"] += 1
             updates.append("not on Bandcamp")
 
+        mark_workflow_step(conn, rid, "bandcamp")
         conn.commit()
         print(f"{label}: {', '.join(updates) if updates else 'no updates'}")
         time.sleep(0.5)
@@ -163,7 +184,7 @@ def main():
     if stats["no_bandcamp"]:
         print(f"Records not on Bandcamp: {stats['no_bandcamp']}.")
     print("Next step: python enrich_spotify.py  (last backup, optional)")
-    print("        or: python enrich_bpm.py      (missing BPMs)")
+    print("        or: python analyze_bpm.py     (missing BPMs)")
 
 
 if __name__ == "__main__":

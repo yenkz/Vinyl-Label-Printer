@@ -1,5 +1,5 @@
 """
-bpm_manual.py — STEP 7 alternative (CSV spreadsheet workflow)
+bpm_manual.py — STEP 6 alternative (CSV spreadsheet workflow)
 
 Used to manually enter BPMs that automatic search didn't find. Works in two modes:
 

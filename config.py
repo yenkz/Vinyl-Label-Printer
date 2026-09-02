@@ -19,8 +19,6 @@ load_dotenv(Path(__file__).parent / ".env")
 # =========================================================
 DISCOGS_USER_TOKEN = os.environ.get("DISCOGS_USER_TOKEN", "")
 DISCOGS_USERNAME = os.environ.get("DISCOGS_USERNAME", "")
-GETSONGBPM_API_KEY = os.environ.get("GETSONGBPM_API_KEY", "")
-
 # OPTIONAL. Spotify app (https://developer.spotify.com/dashboard)
 # to enrich labels: album cover, missing durations from Discogs, and ISRC.
 # Note: new Spotify apps do NOT have BPM access (audio-features blocked since Nov 2024).
@@ -73,7 +71,8 @@ YOUTUBE_COOKIES_BROWSER = ""
 # =========================================================
 # 4) LABELS
 # =========================================================
-# Brother QL printers print on continuous 62mm wide rolls.
+# Brother QL printers print on continuous 62mm wide rolls. This project sends
+# jobs in the two-color mode required by the DK-2251 black/red-on-white roll.
 # Do NOT change this unless you buy a different type of roll.
 LABEL_WIDTH_MM = 62
 LABEL_WIDTH_PX = 696  # printable width in pixels at 300dpi (fixed)

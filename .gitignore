@@ -7,3 +7,4 @@ labels_output/
 .venv/
 .claude/
 covers/
+.DS_Store

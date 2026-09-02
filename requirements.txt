@@ -6,6 +6,8 @@ brother-ql-inventree
 pyusb
 yt-dlp
 librosa
+# Full-track musical-key detector with EDM-specific tonal profiles.
+essentia
 deeprhythm
 imageio-ffmpeg
 slskd-api

@@ -1,10 +1,11 @@
 """
 analyze_bpm.py — STEP 5 (Beatport fallback)
 
-For each track that still has no BPM (because Beatport didn't have it),
+For each track that still has no BPM or musical key (because Beatport didn't
+have it),
 searches for it on Bandcamp, YouTube, or SoundCloud (in that order), downloads
-the audio to a temporary folder, measures the tempo locally and saves the result,
-noted as source "youtube" in bpm_sources (with the video it came from).
+the audio to a temporary folder, measures tempo and tonality locally, and saves
+the results with their detector provenance.
 The audio is deleted right after analysis.
 
 Bandcamp is tried first: for small electronic music labels it usually has
@@ -38,23 +39,34 @@ typical error of "one detector heard 89 where the other heard 134" — deeprhyth
 is saved anyway, but the track is marked as doubtful, with the other candidate
 one click away in the editor.
 
+Key is also measured with TWO detectors. Essentia's EDM-oriented ``bgate``
+profile is the primary estimate; librosa independently compares the track's
+harmonic CQT chroma against major/minor key profiles. Exact agreement is saved
+as confirmed. A disagreement or single-detector result is saved for review with
+the alternative visible in the editor. Key uses the complete downloaded track;
+the 60-second middle excerpt remains specific to BPM.
+
 Since tempo detectors sometimes return double or half, the result is adjusted
 to the typical club music range (88–176). If your collection is different
 (hip hop, ambient...), adjust BPM_MIN / BPM_MAX in common.py.
 
 How to run it:
-    python analyze_bpm.py        # analyze all that are missing
+    python analyze_bpm.py        # missing BPMs/keys on newly imported records
     python analyze_bpm.py 5      # only 5 (for testing)
+    python analyze_bpm.py --all  # retry old missing BPMs/keys too
+    python analyze_bpm.py 20 --pace 8  # wait 8s between tracks in this batch
 
 You can stop with Ctrl+C anytime: what's already analyzed is saved,
 and next time it continues from where it left off.
 """
 
+import argparse
 import difflib
+import math
 import subprocess
-import sys
 import tempfile
 import time
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import imageio_ffmpeg
@@ -64,8 +76,14 @@ import requests
 from yt_dlp import YoutubeDL
 
 import config
-from common import fit_to_range, format_duration, parse_duration
-from db import get_connection, init_db, record_bpm_source
+from common import fit_to_range, format_duration, normalize_key, parse_duration
+from db import (
+    get_connection,
+    init_db,
+    mark_workflow_step,
+    record_bpm_source,
+    record_key_source,
+)
 
 # If the two detectors differ by more than this (already adjusted to
 # common.py range), the track is marked for manual review.
@@ -75,6 +93,9 @@ TOLERANCE_BPM = 2.5
 # considered the correct track: 20 seconds or 12%, whichever is larger.
 TOLERANCE_SECONDS = 20
 TOLERANCE_PERCENTAGE = 0.12
+
+# Delay between tracks. It can be overridden for one run with --pace.
+DEFAULT_PACE_SECONDS = 3.0
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -88,6 +109,25 @@ SEARCHERS = [
     ("YouTube", "ytsearch6"),
     ("SoundCloud", "scsearch6"),
 ]
+
+
+@dataclass
+class KeySourceEstimate:
+    source: str
+    key: str
+    strength: float | None = None
+
+
+@dataclass
+class AudioAnalysis:
+    bpm: float | None = None
+    bpm_alt: float | None = None
+    bpm_doubtful: bool = False
+    key: str | None = None
+    key_alt: str | None = None
+    key_doubtful: bool = False
+    key_strength: float | None = None
+    key_estimates: list[KeySourceEstimate] = field(default_factory=list)
 
 
 def base_options():
@@ -109,6 +149,41 @@ def summarize_error(e):
     if "DRM protected" in text:
         return "served with DRM (cannot download)"
     return text[:120]
+
+
+def non_negative_seconds(value):
+    """Argparse type for a finite delay of zero seconds or more."""
+    try:
+        seconds = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("pace must be a number of seconds") from error
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError("pace must be zero or more seconds")
+    return seconds
+
+
+def parse_arguments(arguments=None):
+    parser = argparse.ArgumentParser(
+        description="Measure missing BPMs and musical keys from downloaded audio."
+    )
+    parser.add_argument("limit", nargs="?", type=int, help="maximum tracks to analyze")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="retry old tracks that are still missing BPM or key",
+    )
+    parser.add_argument(
+        "--pace",
+        type=non_negative_seconds,
+        default=DEFAULT_PACE_SECONDS,
+        metavar="SECONDS",
+        help=("wait this many seconds between tracks "
+              f"(default: {DEFAULT_PACE_SECONDS:g})"),
+    )
+    args = parser.parse_args(arguments)
+    if args.limit is not None and args.limit < 1:
+        parser.error("limit must be a positive integer")
+    return args
 
 
 # Words that don't say anything about WHICH track it is (appear in any
@@ -363,7 +438,8 @@ def measure_bpm(audio_path, video_duration):
     deeprhythm is much more precise on electronic music, and agreement between
     both tells us if the number is trustworthy.
     """
-    wav = audio_path.with_suffix(".wav")
+    # Use a distinct name even when the downloaded source is already WAV.
+    wav = audio_path.with_name(f"{audio_path.stem}.bpm.wav")
     start = min(60, int(video_duration // 3)) if video_duration else 30
     subprocess.run(
         [FFMPEG, "-y", "-loglevel", "error",
@@ -394,11 +470,116 @@ def measure_bpm(audio_path, video_duration):
     return bpm_dr, bpm_lr, True
 
 
-def download_and_measure(video, tmpdir):
-    """Downloads the video's audio to tmpdir, measures tempo, and deletes the
-    file. Returns the same as measure_bpm. If download fails (e.g., SoundCloud
-    serving the track with DRM), lets the exception bubble up so the caller
-    can try another candidate."""
+# Krumhansl-Schmuckler pitch-class profiles, ordered C through B. librosa
+# provides the chromagram, not the final 24-way key classifier, so we compare
+# its full-track harmonic chroma with every rotation of these profiles.
+KRUMHANSL_MAJOR = np.array(
+    [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+)
+KRUMHANSL_MINOR = np.array(
+    [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+)
+PITCH_NAMES = ("C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")
+
+
+def estimate_key_from_chroma(chroma):
+    """Returns (key, best correlation, best-minus-second margin).
+
+    This small pure function is kept separate so the 24-way classifier can be
+    unit-tested without loading audio or either detector's native dependency.
+    """
+    chroma = np.asarray(chroma, dtype=float)
+    if chroma.ndim == 2:
+        chroma = np.mean(chroma, axis=1)
+    if chroma.shape != (12,) or not np.isfinite(chroma).all() or not np.any(chroma):
+        return None, None, None
+
+    scores = []
+    for tonic, name in enumerate(PITCH_NAMES):
+        for profile, suffix in ((KRUMHANSL_MAJOR, ""), (KRUMHANSL_MINOR, "m")):
+            score = float(np.corrcoef(chroma, np.roll(profile, tonic))[0, 1])
+            if np.isfinite(score):
+                scores.append((score, f"{name}{suffix}"))
+    if not scores:
+        return None, None, None
+    scores.sort(reverse=True)
+    best_score, key = scores[0]
+    margin = best_score - scores[1][0] if len(scores) > 1 else None
+    return normalize_key(key), best_score, margin
+
+
+def measure_key_essentia(audio_path):
+    """Estimates the global key with Essentia's EDM-specific bgate profile."""
+    try:
+        import essentia.standard as essentia
+
+        audio = essentia.MonoLoader(filename=str(audio_path), sampleRate=22050)()
+        tonic, scale, strength = essentia.KeyExtractor(
+            sampleRate=22050,
+            profileType="bgate",
+            hpcpSize=36,
+        )(audio)
+        key = normalize_key(f"{tonic} {scale}")
+        return key, float(strength) if key else None
+    except Exception:
+        return None, None
+
+
+def measure_key_librosa(audio_path):
+    """Estimates global key from full-track harmonic CQT chroma."""
+    try:
+        y, sr = librosa.load(str(audio_path), sr=22050, mono=True)
+        if not np.any(np.abs(y) > 1e-7):
+            return None, None
+        harmonic = librosa.effects.harmonic(y, margin=8)
+        chroma = librosa.feature.chroma_cqt(y=harmonic, sr=sr)
+        key, correlation, _margin = estimate_key_from_chroma(chroma)
+        return key, correlation
+    except Exception:
+        return None, None
+
+
+def measure_key(audio_path):
+    """Runs both global-key detectors and applies the consensus policy."""
+    key_es, strength_es = measure_key_essentia(audio_path)
+    key_lr, strength_lr = measure_key_librosa(audio_path)
+    estimates = []
+    if key_es:
+        estimates.append(KeySourceEstimate("essentia", key_es, strength_es))
+    if key_lr:
+        estimates.append(KeySourceEstimate("librosa", key_lr, strength_lr))
+
+    if key_es and key_lr:
+        if key_es == key_lr:
+            return key_es, None, False, strength_es, estimates
+        return key_es, key_lr, True, strength_es, estimates
+    if key_es:
+        return key_es, None, True, strength_es, estimates
+    if key_lr:
+        return key_lr, None, True, strength_lr, estimates
+    return None, None, False, None, estimates
+
+
+def measure_audio(audio_path, video_duration, *, need_bpm=True, need_key=True):
+    """Measures only the missing fields, avoiding unnecessary heavy work."""
+    result = AudioAnalysis()
+    if need_bpm:
+        bpm, bpm_alt, bpm_doubtful = measure_bpm(audio_path, video_duration)
+        result.bpm = bpm
+        result.bpm_alt = bpm_alt
+        result.bpm_doubtful = bpm_doubtful
+    if need_key:
+        key, key_alt, key_doubtful, key_strength, estimates = measure_key(audio_path)
+        result.key = key
+        result.key_alt = key_alt
+        result.key_doubtful = key_doubtful
+        result.key_strength = key_strength
+        result.key_estimates = estimates
+    return result
+
+
+def download_and_measure(video, tmpdir, *, need_bpm=True, need_key=True):
+    """Downloads audio, measures BPM and key, then deletes temporary files."""
     download_opts = base_options()
     download_opts.update(
         {
@@ -411,7 +592,12 @@ def download_and_measure(video, tmpdir):
         with YoutubeDL(download_opts) as ydl:
             info = ydl.extract_info(video["url"], download=True)
             audio_path = Path(ydl.prepare_filename(info))
-        return measure_bpm(audio_path, video.get("duration"))
+        return measure_audio(
+            audio_path,
+            video.get("duration"),
+            need_bpm=need_bpm,
+            need_key=need_key,
+        )
     finally:
         # delete the audio as soon as we measure it (or what's left
         # of a failed download)
@@ -419,13 +605,28 @@ def download_and_measure(video, tmpdir):
             file.unlink()
 
 
-def analyze_track(artist, title, target_duration, tmpdir, catno=None):
+def analyze_track(
+    artist,
+    title,
+    target_duration,
+    tmpdir,
+    catno=None,
+    *,
+    need_bpm=True,
+    need_key=True,
+):
     """Searches for the track (Bandcamp first, YouTube and SoundCloud if not),
-    downloads the best candidate, and returns (bpm, alternative, doubtful, detail).
-    If no candidate passes the duration filter but one matches title and artist,
-    it measures it anyway as a last resort (see rescue pass below).
-    If nothing works, bpm is None and detail explains why."""
+    downloads the best candidate, and returns (AudioAnalysis, detail).
+
+    ``need_bpm`` and ``need_key`` decide which result makes a candidate useful.
+    This matters when a track already has BPM but still needs a key: a candidate
+    that only yields tempo must not stop the search prematurely.
+    """
     queries = build_queries(artist, title, catno)
+
+    def found_needed(result):
+        return ((need_bpm and result.bpm is not None)
+                or (need_key and result.key is not None))
 
     reasons = []
     rescues = []  # (searcher, video) matching everything except duration
@@ -462,14 +663,16 @@ def analyze_track(artist, title, target_duration, tmpdir, catno=None):
         # upload of the same song that does download.
         for video in videos[:3]:
             try:
-                bpm, alternative, doubtful = download_and_measure(video, tmpdir)
+                result = download_and_measure(
+                    video, tmpdir, need_bpm=need_bpm, need_key=need_key
+                )
             except Exception as e:
                 reasons.append(f"{name}: {summarize_error(e)}")
                 continue
-            if bpm is None:
-                reasons.append(f"{name}: couldn't measure clear tempo")
+            if not found_needed(result):
+                reasons.append(f"{name}: couldn't measure the missing BPM/key")
                 continue
-            return bpm, alternative, doubtful, f"{video.get('title', '')} [{name}]"
+            return result, f"{video.get('title', '')} [{name}]"
 
     # Rescue pass: no one passed the complete filter, but these candidates
     # match title and artist and only fail on duration. It's almost always
@@ -480,62 +683,103 @@ def analyze_track(artist, title, target_duration, tmpdir, catno=None):
     rescues.sort(key=lambda pair: abs(pair[1]["duration"] - target_duration))
     for name, video in rescues[:2]:
         try:
-            bpm, alternative, _ = download_and_measure(video, tmpdir)
+            result = download_and_measure(
+                video, tmpdir, need_bpm=need_bpm, need_key=need_key
+            )
         except Exception as e:
             reasons.append(f"{name}: {summarize_error(e)}")
             continue
-        if bpm is None:
-            reasons.append(f"{name}: couldn't measure clear tempo")
+        if not found_needed(result):
+            reasons.append(f"{name}: couldn't measure the missing BPM/key")
             continue
+        result = replace(
+            result,
+            bpm_doubtful=result.bpm is not None,
+            key_doubtful=result.key is not None,
+        )
         detail = (f"{video.get('title', '')} [{name}; note: lasts "
                   f"{format_duration(video['duration'])} but Discogs says "
                   f"{format_duration(target_duration)} — different edition?]")
-        return bpm, alternative, True, detail
+        return result, detail
 
-    return None, None, False, " | ".join(reasons)
+    return AudioAnalysis(), " | ".join(reasons)
 
 
 def main():
-    limit = None
-    if len(sys.argv) > 1:
-        try:
-            limit = int(sys.argv[1])
-        except ValueError:
-            print(__doc__)
-            return
+    args = parse_arguments()
+    process_all = args.all
+    limit = args.limit
 
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT tracks.id, tracks.title, tracks.duration_display,
+        SELECT tracks.id, tracks.release_id, tracks.title, tracks.duration_display,
+               tracks.bpm, tracks.key,
                COALESCE(tracks.artist, releases.artist) AS artist,
                releases.catno
         FROM tracks
         JOIN releases ON releases.release_id = tracks.release_id
-        WHERE tracks.bpm IS NULL
+        WHERE (tracks.bpm IS NULL OR tracks.key IS NULL)
+          AND (? OR NOT EXISTS (
+              SELECT 1 FROM workflow_steps
+              WHERE workflow_steps.release_id = releases.release_id
+                AND step = 'analyze'
+          ))
         ORDER BY releases.artist, releases.title, tracks.id
-        """
+        """,
+        (int(process_all),),
     )
-    pending = cursor.fetchall()
+    all_pending = cursor.fetchall()
+    pending = all_pending
     if limit:
         pending = pending[:limit]
 
-    print(f"Tracks to analyze: {len(pending)}")
-    print("(this downloads audio from YouTube and measures it here; takes ~30s per track,")
-    print(" you can stop with Ctrl+C and resume later)\n")
+    candidate_releases = {
+        row["release_id"]
+        for row in cursor.execute(
+            "SELECT release_id FROM releases WHERE ?"
+            " OR NOT EXISTS (SELECT 1 FROM workflow_steps"
+            "                WHERE workflow_steps.release_id = releases.release_id"
+            "                  AND step = 'analyze')",
+            (int(process_all),),
+        )
+    }
 
-    found = 0
-    doubtful = 0
+    print(f"Tracks to analyze: {len(pending)}")
+    if not pending:
+        for release_id in candidate_releases:
+            mark_workflow_step(conn, release_id, "analyze")
+        conn.commit()
+        conn.close()
+        print("Nothing new to analyze. Use --all to revisit old missing BPMs/keys.")
+        return
+    print("(this downloads audio and measures BPM/key here; full-track key analysis")
+    print(" can take longer than 30s per track,")
+    print(" you can stop with Ctrl+C and resume later)")
+    if args.pace:
+        print(f"Pace: {args.pace:g}s between tracks.\n")
+    else:
+        print("Pace: no delay between tracks.\n")
+
+    bpm_found = 0
+    bpm_doubtful = 0
+    keys_found = 0
+    keys_doubtful = 0
+    attempted = set()
     with tempfile.TemporaryDirectory() as tmpdir:
         for i, row in enumerate(pending, start=1):
             label = f"[{i}/{len(pending)}] {row['artist']} - {row['title']}"
+            need_bpm = row["bpm"] is None
+            need_key = row["key"] is None
             try:
-                bpm, alternative, doubt, detail = analyze_track(
+                result, detail = analyze_track(
                     row["artist"], row["title"],
                     parse_duration(row["duration_display"]), tmpdir,
                     row["catno"],
+                    need_bpm=need_bpm,
+                    need_key=need_key,
                 )
             except KeyboardInterrupt:
                 print("\nStopped. What was analyzed is saved.")
@@ -544,38 +788,88 @@ def main():
                 print(f"{label}\n   -> error, continuing: {e}")
                 continue
 
-            if bpm:
+            updates = []
+            if need_bpm and result.bpm is not None:
                 cursor.execute(
                     "UPDATE tracks SET bpm = ?, bpm_source = 'youtube',"
                     " bpm_alt = ?, bpm_needs_review = ?, bpm_verified = 0 WHERE id = ?",
-                    (bpm, alternative, int(doubt), row["id"]),
+                    (result.bpm, result.bpm_alt, int(result.bpm_doubtful), row["id"]),
                 )
-                record_bpm_source(conn, row["id"], "youtube", bpm, detail)
-                conn.commit()
-                found += 1
-                doubtful += int(doubt)
-                if doubt and alternative:
-                    warning = f"  [DOUBTFUL: other detector measured {alternative:g}]"
-                elif doubt:
-                    warning = "  [DOUBTFUL: only one detector measured]"
+                record_bpm_source(conn, row["id"], "youtube", result.bpm, detail)
+                bpm_found += 1
+                bpm_doubtful += int(result.bpm_doubtful)
+                if result.bpm_doubtful and result.bpm_alt is not None:
+                    warning = f"; other detector {result.bpm_alt:g}?"
+                elif result.bpm_doubtful:
+                    warning = "; review"
                 else:
                     warning = ""
-                print(f"{label} -> {bpm:g} BPM{warning}\n   (measured from: {detail})")
+                updates.append(f"{result.bpm:g} BPM{warning}")
+
+            if need_key and result.key is not None:
+                cursor.execute(
+                    "UPDATE tracks SET key = ?, key_source = 'audio', key_alt = ?,"
+                    " key_needs_review = ?, key_verified = ?, key_strength = ?"
+                    " WHERE id = ?",
+                    (
+                        result.key,
+                        result.key_alt,
+                        int(result.key_doubtful),
+                        int(not result.key_doubtful),
+                        result.key_strength,
+                        row["id"],
+                    ),
+                )
+                for estimate in result.key_estimates:
+                    record_key_source(
+                        conn,
+                        row["id"],
+                        estimate.source,
+                        estimate.key,
+                        estimate.strength,
+                        detail,
+                    )
+                keys_found += 1
+                keys_doubtful += int(result.key_doubtful)
+                key_text = result.key
+                if result.key_alt:
+                    key_text += f"; other detector {result.key_alt}?"
+                elif result.key_doubtful:
+                    key_text += "; review"
+                else:
+                    key_text += "; detectors agree"
+                updates.append(f"key {key_text}")
+
+            if updates:
+                print(f"{label} -> {', '.join(updates)}\n   (measured from: {detail})")
             else:
                 print(f"{label}\n   -> {detail}")
 
-            # Pause between tracks to not trigger YouTube's anti-bot.
-            time.sleep(3)
+            attempted.add(row["id"])
+            conn.commit()
 
+            # Pause between tracks to reduce source rate limiting. Do not make
+            # the user wait after the final track in this batch.
+            if args.pace and i < len(pending):
+                time.sleep(args.pace)
+
+    required_by_release = {}
+    for row in all_pending:
+        required_by_release.setdefault(row["release_id"], set()).add(row["id"])
+    for release_id in candidate_releases:
+        if required_by_release.get(release_id, set()) <= attempted:
+            mark_workflow_step(conn, release_id, "analyze")
+    conn.commit()
     conn.close()
     print("\n" + "=" * 50)
-    print(f"BPM measured for {found} of {len(pending)} tracks.")
-    if doubtful:
-        print(f"{doubtful} were marked as doubtful (detectors didn't")
-        print("agree), with the other candidate one click away in the editor.")
+    print(f"BPM measured: {bpm_found} ({bpm_doubtful} need review).")
+    print(f"Keys measured: {keys_found} ({keys_doubtful} need review).")
+    if bpm_doubtful or keys_doubtful:
+        print("Review detector disagreements in the editor: python edit_bpm.py")
     else:
-        print("Both detectors agreed on all: good sign.")
-    print("Your turn: validate them in the editor: python edit_bpm.py")
+        print("The detectors agreed on every locally measured key.")
+    if bpm_found:
+        print("Fallback BPMs still need your validation in: python edit_bpm.py")
 
 
 if __name__ == "__main__":

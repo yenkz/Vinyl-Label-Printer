@@ -11,11 +11,10 @@ Beatport's official data is consulted anyway), and saves what it finds:
   - The tonality (key), displayed on the label in Camelot notation ("8A").
   - The ISRC, if not already present.
 
-It also cross-references sources: if a track already had automatic BPM (from
-audio measurement or Deezer) and Beatport says the same, the question is
-resolved — but NOTHING validates itself: you put the green checkmark only
-in the editor (python edit_bpm.py), where you see all sources side by side.
-If they differ, the track is marked as doubtful, with the other value one click away.
+Finding the same track in both Discogs and Beatport is the automatic validation:
+the Beatport BPM is saved as the main value and marked verified in the database.
+Manual values always win, and a value you previously confirmed yourself is not
+silently replaced when it disagrees with Beatport.
 
 How does it work without an API key? Beatport doesn't give public API access,
 but its own embedded player (embed.beatport.com) uses an "anonymous client"
@@ -29,8 +28,9 @@ For not importing tracks from different songs, the candidate must match the
 artist, title (including remix/mix name), and duration according to Discogs.
 
 How to run it:
-    python enrich_beatport.py        # all pending tracks
+    python enrich_beatport.py        # tracks from newly imported records
     python enrich_beatport.py 5      # only 5 (for testing)
+    python enrich_beatport.py --all  # deliberately revisit every track
 """
 
 import re
@@ -47,7 +47,13 @@ from common import (
     parse_duration,
     looks_similar,
 )
-from db import get_connection, init_db, record_bpm_source
+from db import (
+    get_connection,
+    init_db,
+    mark_workflow_step,
+    record_bpm_source,
+    record_key_source,
+)
 
 BEATPORT_API = "https://api.beatport.com/v4"
 BEATPORT_EMBED = "https://embed.beatport.com/"
@@ -72,7 +78,7 @@ TOLERANCE_SECONDS = 15
 TOLERANCE_PERCENTAGE = 0.08
 
 # If the BPM we already had and Beatport's differ by less than this,
-# we consider them "in agreement" (same criterion as analyze_bpm).
+# we describe them as being in agreement (same criterion as analyze_bpm).
 TOLERANCE_BPM = 2.5
 
 # The anonymous token lasts 10 minutes; we renew it only when it expires.
@@ -178,7 +184,7 @@ def search_beatport(artist, title, target_duration):
 
         if not is_various:
             names = [a.get("name", "") for a in track.get("artists") or []]
-            if not any(looks_similar(n, artist, umbral=0.8) for n in names):
+            if not any(looks_similar(n, artist, threshold=0.8) for n in names):
                 continue
 
         track_duration = (track.get("length_ms") or 0) / 1000
@@ -200,52 +206,111 @@ def search_beatport(artist, title, target_duration):
 
 
 def main():
+    arguments = sys.argv[1:]
+    process_all = "--all" in arguments
+    arguments = [arg for arg in arguments if arg != "--all"]
     limit = None
-    if len(sys.argv) > 1:
+    if arguments:
         try:
-            limit = int(sys.argv[1])
-        except ValueError:
+            limit = int(arguments[0])
+        except (ValueError, IndexError):
             print(__doc__)
             return
+    if len(arguments) > 1:
+        print(__doc__)
+        return
 
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
-    # Beatport is consulted for ALL tracks, whether they have BPM or not:
-    # it's the reference source. We only skip tracks that already have a
-    # Beatport response recorded in bpm_sources (even if it's "not found"),
-    # so subsequent runs go straight to what's missing.
+
+    # Before this source policy was introduced, a successful Beatport match was
+    # deliberately left for manual confirmation. Bring those existing rows in
+    # line with the current rule too, even when there is no new work to search.
+    cursor.execute(
+        "UPDATE tracks SET"
+        " bpm = (SELECT bpm FROM bpm_sources"
+        "        WHERE track_id = tracks.id AND source = 'beatport'),"
+        " bpm_source = 'beatport', bpm_verified = 1,"
+        " bpm_needs_review = 0, bpm_alt = NULL"
+        " WHERE bpm_verified = 0 AND EXISTS ("
+        "     SELECT 1 FROM bpm_sources"
+        "     WHERE track_id = tracks.id AND source = 'beatport' AND bpm IS NOT NULL"
+        " )"
+    )
+    previously_confirmed = cursor.rowcount
+    conn.commit()
+
+    candidate_releases = {
+        row["release_id"]
+        for row in cursor.execute(
+            "SELECT release_id FROM releases WHERE ?"
+            " OR NOT EXISTS (SELECT 1 FROM workflow_steps"
+            "                WHERE workflow_steps.release_id = releases.release_id"
+            "                  AND step = 'beatport')",
+            (int(process_all),),
+        )
+    }
+    # Beatport is the reference source, so a new release consults it for every
+    # track, even when another source already supplied BPM. In normal delta mode
+    # a recorded Beatport miss also counts as attempted and is not retried.
     cursor.execute(
         """
-        SELECT tracks.id, tracks.title, tracks.duration_display, tracks.bpm,
+        SELECT tracks.id, tracks.release_id, tracks.title, tracks.duration_display, tracks.bpm,
                tracks.bpm_source, tracks.bpm_alt, tracks.bpm_needs_review,
-               tracks.bpm_verified, tracks.key, tracks.isrc,
+               tracks.bpm_verified, tracks.key, tracks.key_source,
+               tracks.key_needs_review, tracks.key_verified, tracks.isrc,
                COALESCE(tracks.artist, releases.artist) AS artist
         FROM tracks
         JOIN releases ON releases.release_id = tracks.release_id
-        WHERE tracks.key IS NULL
-           OR NOT EXISTS (SELECT 1 FROM bpm_sources
-                          WHERE track_id = tracks.id AND source = 'beatport')
+        WHERE tracks.release_id IN (
+                  SELECT release_id FROM releases
+                  WHERE ? OR NOT EXISTS (
+                      SELECT 1 FROM workflow_steps
+                      WHERE workflow_steps.release_id = releases.release_id
+                        AND step = 'beatport'
+                  )
+              )
+          AND (? OR NOT EXISTS (SELECT 1 FROM bpm_sources
+                                WHERE track_id = tracks.id AND source = 'beatport'))
         ORDER BY releases.artist, releases.title, tracks.id
-        """
+        """,
+        (int(process_all), int(process_all)),
     )
-    pending = cursor.fetchall()
+    all_pending = cursor.fetchall()
+    pending = all_pending
     if limit:
         pending = pending[:limit]
 
     print(f"Tracks to check on Beatport: {len(pending)}\n")
+    if not pending:
+        for release_id in candidate_releases:
+            mark_workflow_step(conn, release_id, "beatport")
+        conn.commit()
+        conn.close()
+        if previously_confirmed:
+            print(f"Auto-confirmed {previously_confirmed} existing Beatport BPMs.")
+        print("Nothing new to check. Use --all to revisit the whole collection.")
+        return
     print("Connecting to Beatport (anonymous token from embedded player)...")
     if current_token() is None:
         print(
             "Could not get Beatport's anonymous token.\n"
             "It might be a connection issue, or Beatport changed its\n"
             "embedded player. Try again later; in the meantime\n"
-            "the rest of the workflow still works (enrich_bpm.py, analyze_bpm.py)."
+            "the rest of the workflow still works (analyze_bpm.py)."
         )
         return
     print("Connected.\n")
 
-    stats = {"bpm": 0, "keys": 0, "match": 0, "doubtful": 0, "isrc": 0}
+    stats = {
+        "bpm": 0,
+        "keys": 0,
+        "confirmed": previously_confirmed,
+        "kept_confirmed": 0,
+        "isrc": 0,
+    }
+    attempted = set()
     for i, row in enumerate(pending, start=1):
         # If the record has multiple artists we store them as
         # "Artist 1 / Artist 2"; for searching we use only the first one.
@@ -269,6 +334,7 @@ def main():
                 (row["id"],),
             )
             conn.commit()
+            attempted.add(row["id"])
             print(f"{label} (not on Beatport)")
             time.sleep(0.6)
             continue
@@ -291,13 +357,15 @@ def main():
                 detail = f"{detail} (sheet says {card_bpm:g} BPM)"
             record_bpm_source(conn, row["id"], "beatport", beatport_bpm, detail)
             if row["bpm"] is None:
-                # No previous BPM: Beatport's becomes the main one,
-                # but NOT validated — you put the checkmark in the editor.
+                # The track was discovered on Discogs and independently matched
+                # on Beatport, so Beatport's official BPM is trusted and verified.
                 cursor.execute(
-                    "UPDATE tracks SET bpm = ?, bpm_source = 'beatport' WHERE id = ?",
+                    "UPDATE tracks SET bpm = ?, bpm_source = 'beatport',"
+                    " bpm_alt = NULL, bpm_needs_review = 0, bpm_verified = 1 WHERE id = ?",
                     (beatport_bpm, row["id"]),
                 )
                 stats["bpm"] += 1
+                stats["confirmed"] += 1
                 updates.append(f"{beatport_bpm:g} BPM")
             elif row["bpm_source"] == "manual":
                 # You entered it: unchanged. Beatport's figure
@@ -305,42 +373,36 @@ def main():
                 updates.append(f"Beatport says {beatport_bpm:g} (keeping yours)")
             elif abs(row["bpm"] - beatport_bpm) <= TOLERANCE_BPM:
                 # Beatport agrees: we adopt its figure (it's the official one)
-                # and the doubt is resolved, but validation remains yours,
-                # with one click in the editor.
+                # and the Discogs + Beatport match validates it automatically.
                 if row["bpm_verified"]:
                     updates.append("Beatport matches your validated value")
                 else:
                     cursor.execute(
                         "UPDATE tracks SET bpm = ?, bpm_source = 'beatport',"
-                        " bpm_alt = NULL, bpm_needs_review = 0 WHERE id = ?",
+                        " bpm_alt = NULL, bpm_needs_review = 0, bpm_verified = 1 WHERE id = ?",
                         (beatport_bpm, row["id"]),
                     )
-                    stats["match"] += 1
-                    updates.append("Beatport matches (confirm in editor)")
+                    stats["confirmed"] += 1
+                    updates.append("Beatport matches (auto-confirmed)")
             elif row["bpm_verified"]:
-                # You had already validated it and Beatport says something else:
-                # we don't overwrite your value, but reopen the doubt so you
-                # look at it with both figures in sight.
-                cursor.execute(
-                    "UPDATE tracks SET bpm_alt = ?, bpm_needs_review = 1,"
-                    " bpm_verified = 0 WHERE id = ?",
-                    (beatport_bpm, row["id"]),
-                )
-                stats["doubtful"] += 1
+                # An explicit user confirmation has higher priority than a later
+                # automatic lookup. Keep it verified; the Beatport value remains
+                # visible in bpm_sources for comparison in the editor.
+                stats["kept_confirmed"] += 1
                 updates.append(
-                    f"warning: was validated at {row['bpm']:g} but Beatport says {beatport_bpm:g}"
+                    f"Beatport says {beatport_bpm:g} (keeping your confirmed {row['bpm']:g})"
                 )
             else:
                 # They differ and the previous value was automatic: Beatport's
-                # official figure wins, the other stays one click away.
+                # official value wins and the cross-source identity match confirms it.
                 cursor.execute(
                     "UPDATE tracks SET bpm = ?, bpm_source = 'beatport',"
-                    " bpm_alt = ?, bpm_needs_review = 1 WHERE id = ?",
-                    (beatport_bpm, row["bpm"], row["id"]),
+                    " bpm_alt = NULL, bpm_needs_review = 0, bpm_verified = 1 WHERE id = ?",
+                    (beatport_bpm, row["id"]),
                 )
-                stats["doubtful"] += 1
+                stats["confirmed"] += 1
                 updates.append(
-                    f"doubtful BPM (measured {row['bpm']:g}, Beatport says {beatport_bpm:g})"
+                    f"{beatport_bpm:g} BPM from Beatport (replaced automatic {row['bpm']:g}; auto-confirmed)"
                 )
         else:
             # It's on Beatport but with no BPM set: we note it so we don't
@@ -351,15 +413,37 @@ def main():
                 (row["id"], detail),
             )
 
-        if row["key"] is None:
-            key = normalize_key((candidate.get("key") or {}).get("name"))
-            if key:
+        key = normalize_key((candidate.get("key") or {}).get("name"))
+        if key:
+            record_key_source(conn, row["id"], "beatport", key, detail=detail)
+            if row["key"] is None:
                 cursor.execute(
-                    "UPDATE tracks SET key = ?, key_source = 'beatport' WHERE id = ?",
+                    "UPDATE tracks SET key = ?, key_source = 'beatport',"
+                    " key_alt = NULL, key_needs_review = 0, key_verified = 1,"
+                    " key_strength = NULL WHERE id = ?",
                     (key, row["id"]),
                 )
                 stats["keys"] += 1
                 updates.append(f"key {key} ({to_camelot(key)})")
+            elif row["key_source"] == "manual":
+                updates.append(f"Beatport key {key} (keeping yours)")
+            elif row["key"] == key:
+                cursor.execute(
+                    "UPDATE tracks SET key_source = 'beatport', key_alt = NULL,"
+                    " key_needs_review = 0, key_verified = 1, key_strength = NULL"
+                    " WHERE id = ?",
+                    (row["id"],),
+                )
+                updates.append("Beatport confirms key")
+            else:
+                cursor.execute(
+                    "UPDATE tracks SET key = ?, key_source = 'beatport', key_alt = NULL,"
+                    " key_needs_review = 0, key_verified = 1, key_strength = NULL"
+                    " WHERE id = ?",
+                    (key, row["id"]),
+                )
+                stats["keys"] += 1
+                updates.append(f"Beatport key {key} replaces automatic {row['key']}")
 
         if not row["isrc"] and candidate.get("isrc"):
             cursor.execute(
@@ -370,20 +454,36 @@ def main():
             updates.append("ISRC")
 
         conn.commit()
+        attempted.add(row["id"])
         print(f"{label} -> {', '.join(updates) if updates else 'no updates'}")
 
         # Take it easy, the API is borrowed.
         time.sleep(0.6)
 
+    # Mark only releases whose complete selected workload finished. With n=...
+    # or a connection interruption, an unfinished release remains pending and
+    # the next invocation resumes at its unattempted tracks.
+    pending_by_release = {}
+    for row in all_pending:
+        pending_by_release.setdefault(row["release_id"], set()).add(row["id"])
+    for release_id in candidate_releases:
+        required = pending_by_release.get(release_id, set())
+        if required <= attempted:
+            mark_workflow_step(conn, release_id, "beatport")
+    conn.commit()
     conn.close()
 
     print("\n" + "=" * 50)
     print(
         f"Beatport: {stats['bpm']} new BPMs, {stats['keys']} keys, "
-        f"{stats['match']} match the measured values, {stats['doubtful']} doubtful, "
+        f"{stats['confirmed']} BPMs auto-confirmed from Discogs + Beatport, "
+        f"{stats['kept_confirmed']} prior confirmations preserved, "
         f"{stats['isrc']} ISRCs."
     )
-    print("Remember: nothing validates itself — you put the checkmark in the editor.")
+    print(
+        "Matched Beatport BPMs are already confirmed; "
+        "the editor is only needed for the rest."
+    )
     print("Next step: python enrich_bandcamp.py  (covers/durations that are missing)")
     print("        or: python analyze_bpm.py      (measure what Beatport didn't have)")
     print("        or: python edit_bpm.py         (validate BPMs, source by source)")

@@ -11,15 +11,17 @@ fills in from Spotify's API what still remains missing after previous steps:
 
 Note: Spotify apps created after Nov 2024 do NOT have BPM access
 (the audio-features endpoint returns 403), so this doesn't replace
-enrich_beatport.py / enrich_bpm.py.
+enrich_beatport.py / analyze_bpm.py.
 
 How to run it:
-    python enrich_spotify.py
+    python enrich_spotify.py          # newly imported records only
+    python enrich_spotify.py --all    # retry the whole collection
 
-You can run it as many times as you like: what's already enriched is skipped,
-so subsequent runs are fast.
+Normal runs skip records already attempted, including old misses. Use --all
+when you want to try incomplete records again.
 """
 
+import sys
 import time
 from pathlib import Path
 
@@ -27,7 +29,7 @@ import requests
 
 import config
 from common import download_cover, looks_similar
-from db import get_connection, init_db
+from db import get_connection, init_db, mark_workflow_step
 
 SPOTIFY_ACCOUNTS = "https://accounts.spotify.com/api/token"
 SPOTIFY_API = "https://api.spotify.com/v1"
@@ -71,7 +73,7 @@ def search_album_spotify(headers, artist, title):
         if is_various:
             return album
         names = [a["name"] for a in album.get("artists", [])]
-        if any(looks_similar(n, artist, umbral=0.8) for n in names):
+        if any(looks_similar(n, artist, threshold=0.8) for n in names):
             return album
     return None
 
@@ -110,7 +112,31 @@ def tracks_from_spotify_album(headers, album_id):
 
 
 def main():
+    process_all = "--all" in sys.argv[1:]
+    if any(arg != "--all" for arg in sys.argv[1:]):
+        print(__doc__)
+        return
+
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM releases WHERE ? OR NOT EXISTS ("
+        " SELECT 1 FROM workflow_steps"
+        " WHERE workflow_steps.release_id = releases.release_id"
+        "   AND step = 'spotify')"
+        " ORDER BY artist, title",
+        (int(process_all),),
+    )
+    releases = cursor.fetchall()
+    print(f"Records to check on Spotify: {len(releases)}\n")
+    if not releases:
+        conn.close()
+        print("Nothing new to check. Use --all to revisit the whole collection.")
+        return
+
     if not config.SPOTIFY_CLIENT_ID or not config.SPOTIFY_CLIENT_SECRET:
+        conn.close()
         print(
             "SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET missing from .env.\n"
             "Create a free app at https://developer.spotify.com/dashboard\n"
@@ -119,16 +145,8 @@ def main():
         )
         return
 
-    init_db()
-    conn = get_connection()
-    cursor = conn.cursor()
-
     token = get_spotify_token()
     headers = {"Authorization": f"Bearer {token}"}
-
-    cursor.execute("SELECT * FROM releases ORDER BY artist, title")
-    releases = cursor.fetchall()
-    print(f"Records in collection: {len(releases)}\n")
 
     stats = {"covers": 0, "durations": 0, "isrc": 0, "no_spotify": 0}
     for i, release in enumerate(releases, start=1):
@@ -139,6 +157,8 @@ def main():
         missing_cover = not release["cover_path"] or not (Path(__file__).parent / release["cover_path"]).exists()
         missing_data = any(not t["duration_display"] or not t["isrc"] for t in tracks_db)
         if not missing_cover and not missing_data:
+            mark_workflow_step(conn, rid, "spotify")
+            conn.commit()
             continue  # already complete, don't waste requests
 
         label = f"[{i}/{len(releases)}] {release['artist']} - {release['title']}"
@@ -180,6 +200,7 @@ def main():
             stats["no_spotify"] += 1
             updates.append("not on Spotify")
 
+        mark_workflow_step(conn, rid, "spotify")
         conn.commit()
         print(f"{label}: {', '.join(updates) if updates else 'no updates'}")
         time.sleep(0.2)
@@ -193,7 +214,7 @@ def main():
     )
     if stats["no_spotify"]:
         print(f"Records not on Spotify: {stats['no_spotify']} (normal with niche vinyl).")
-    print("Next step: python enrich_bpm.py  (if there are pending BPMs)")
+    print("Next step: python analyze_bpm.py  (if there are pending BPMs)")
     print("        or: python render_labels.py")
 
 

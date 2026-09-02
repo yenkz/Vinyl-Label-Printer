@@ -1,19 +1,20 @@
 """
-edit_bpm.py — STEP 7: BPM and tonality editor and validator
+edit_bpm.py — STEP 6: BPM and tonality editor and validator
 
 Launches a local page (only visible on your computer) with your entire
 collection, to load or correct BPMs and keys by hand without exporting and
 importing CSVs: find the record, click on the BPM (or key), type the value
 and done — it's saved directly to the database.
 
-This is also where you VALIDATE: each track shows all the sources where
-a BPM came from (beatport, YouTube measurement, Deezer...) with its value,
-side by side. Nothing validates itself — you always put the green checkmark,
-either with the ✓ button (current value is correct) or by clicking on a
-source pill (use that value and validate it in the same click).
+This is also where you validate the values that still need review. Each track
+shows all BPM sources (Beatport, YouTube measurement, or historical sources)
+side by side. Discogs + Beatport matches are already confirmed automatically;
+for the remaining values, use the ✓ button or click a source pill.
 
 The key is shown in Camelot notation ("8A"), but you can write it any way:
-"8A", "Am", "f# minor" — it's saved normalized.
+"8A", "Am", "f# minor" — it's saved normalized. Automatic Essentia/librosa
+key candidates appear below the field; detector disagreements are highlighted
+and can be resolved by choosing a candidate or confirming the current one.
 
 How to run it:
     python edit_bpm.py
@@ -34,7 +35,7 @@ from pathlib import Path
 
 import config
 from common import to_camelot, normalize_key
-from db import get_connection, init_db, record_bpm_source
+from db import get_connection, init_db, record_bpm_source, record_key_source
 
 COVERS_DIR = Path(__file__).parent / config.COVERS_DIR
 
@@ -45,7 +46,7 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vinyl BPM Editor</title>
+<title>Vinyl BPM &amp; Key Editor</title>
 <style>
   :root {
     --bg: #f5f4f0; --card: #ffffff; --ink: #1a1a1a;
@@ -77,7 +78,7 @@ PAGE = """<!doctype html>
     border: 1px solid var(--line); border-radius: 7px; background: var(--card);
   }
   label.chk { font-size: 13px; color: var(--muted); user-select: none; cursor: pointer; }
-  main { max-width: 860px; margin: 0 auto; padding: 18px 20px 80px; }
+  main { max-width: 1080px; margin: 0 auto; padding: 18px 20px 80px; }
   .release {
     background: var(--card); border: 1px solid var(--line);
     border-radius: 10px; margin-bottom: 14px; overflow: hidden;
@@ -115,7 +116,7 @@ PAGE = """<!doctype html>
   input.bpm.empty { border-style: dashed; border-color: var(--accent); }
   input.bpm.saved { outline: 2px solid var(--ok); border-color: transparent; }
   input.bpm.doubtful { border-color: var(--warn); border-width: 2px; }
-  td.key { width: 64px; }
+  td.key { width: 180px; text-align: center; }
   input.key {
     width: 52px; font: inherit; text-align: center; padding: 4px 4px;
     color: var(--ink); background: transparent;
@@ -123,6 +124,16 @@ PAGE = """<!doctype html>
   }
   input.key:focus { outline: 2px solid var(--accent); border-color: transparent; }
   input.key.saved { outline: 2px solid var(--ok); border-color: transparent; }
+  input.key.doubtful { border-color: var(--warn); border-width: 2px; }
+  .key-options { margin-top: 3px; white-space: nowrap; }
+  button.key-source, button.key-confirm {
+    font: inherit; font-size: 10px; cursor: pointer; background: transparent;
+    border: 1px solid var(--line); border-radius: 12px; padding: 0 5px;
+    color: var(--muted); margin: 1px 2px 0 0;
+  }
+  button.key-source.active { color: var(--ink); border-color: var(--muted); }
+  button.key-source:hover { color: var(--accent); border-color: var(--accent); }
+  button.key-confirm { color: var(--ok); border-color: var(--ok); }
   button.source {
     font: inherit; font-size: 11px; color: var(--muted); cursor: pointer;
     border: 1px solid var(--line); border-radius: 20px; padding: 1px 8px;
@@ -148,10 +159,11 @@ PAGE = """<!doctype html>
 </head>
 <body>
 <header>
-  <h1>Vinyl BPM Editor</h1>
+  <h1>Vinyl BPM &amp; Key Editor</h1>
   <span id="summary"></span>
   <div id="controls">
     <label class="chk"><input type="checkbox" id="onlyMissing"> only missing BPM</label>
+    <label class="chk"><input type="checkbox" id="onlyMissingKey"> only missing key</label>
     <label class="chk"><input type="checkbox" id="onlyDoubtful"> only doubtful</label>
     <label class="chk"><input type="checkbox" id="onlyUnvalidated"> only unvalidated</label>
     <input id="search" type="search" placeholder="search record or track…">
@@ -172,11 +184,13 @@ async function load() {
 function render() {
   const query = document.getElementById('search').value.toLowerCase();
   const onlyMissing = document.getElementById('onlyMissing').checked;
+  const onlyMissingKey = document.getElementById('onlyMissingKey').checked;
   const onlyDoubtful = document.getElementById('onlyDoubtful').checked;
   const onlyUnvalidated = document.getElementById('onlyUnvalidated').checked;
   const list = document.getElementById('list');
   list.textContent = '';
-  let pending = 0, doubtful = 0, unvalidated = 0, validated = 0, total = 0, visible = 0;
+  let pending = 0, keyPending = 0, bpmDoubtful = 0, keyDoubtful = 0;
+  let unvalidated = 0, validated = 0, total = 0, visible = 0;
 
   for (const release of data.releases) {
     const inRelease = (release.artist + ' ' + release.title).toLowerCase().includes(query);
@@ -184,11 +198,14 @@ function render() {
       (inRelease || t.title.toLowerCase().includes(query) ||
         (t.artist || '').toLowerCase().includes(query)) &&
       (!onlyMissing || t.bpm === null) &&
-      (!onlyDoubtful || t.review) &&
+      (!onlyMissingKey || t.key === null) &&
+      (!onlyDoubtful || t.review || t.key_review) &&
       (!onlyUnvalidated || (t.bpm !== null && !t.verified)));
     total += release.tracks.length;
     pending += release.tracks.filter(t => t.bpm === null).length;
-    doubtful += release.tracks.filter(t => t.review).length;
+    keyPending += release.tracks.filter(t => t.key === null).length;
+    bpmDoubtful += release.tracks.filter(t => t.review).length;
+    keyDoubtful += release.tracks.filter(t => t.key_review).length;
     unvalidated += release.tracks.filter(t => t.bpm !== null && !t.verified).length;
     validated += release.tracks.filter(t => t.verified).length;
     if (!tracks.length) continue;
@@ -244,7 +261,7 @@ function render() {
       tdBpm.appendChild(inp);
       const tdKey = cell('key', '');
       const kin = document.createElement('input');
-      kin.className = 'key';
+      kin.className = 'key' + (t.key_review ? ' doubtful' : '');
       kin.value = t.camelot || '';
       kin.dataset.id = t.id;
       kin.title = t.key
@@ -253,12 +270,37 @@ function render() {
       kin.addEventListener('change', onKeyChange);
       kin.addEventListener('keydown', e => { if (e.key === 'Enter') e.target.blur(); });
       tdKey.appendChild(kin);
+      const keyOptions = document.createElement('div');
+      keyOptions.className = 'key-options';
+      const keySourceOrder = { manual: 0, beatport: 1, essentia: 2, librosa: 3 };
+      const keySources = (t.key_sources || []).slice()
+        .sort((a, b) => (keySourceOrder[a.source] ?? 9) - (keySourceOrder[b.source] ?? 9));
+      for (const f of keySources) {
+        const b = document.createElement('button');
+        b.className = 'key-source' +
+          ((t.key_source === f.source || (t.key_source === 'audio' && f.key === t.key))
+            ? ' active' : '');
+        b.textContent = f.source + ' ' + f.camelot;
+        const score = f.strength === null ? '' : ' · score ' + Number(f.strength).toFixed(3);
+        b.title = (f.detail ? f.detail + '\\n' : '') + 'Key ' + f.key + score +
+          '\\nClick to choose and confirm this key';
+        b.addEventListener('click', () => useKeySource(t.id, f.source));
+        keyOptions.appendChild(b);
+      }
+      if (t.key_review && t.key !== null) {
+        const ok = document.createElement('button');
+        ok.className = 'key-confirm';
+        ok.textContent = '✓';
+        ok.title = 'The current key is right: confirm it';
+        ok.addEventListener('click', () => confirmKey(t.id));
+        keyOptions.appendChild(ok);
+      }
+      tdKey.appendChild(keyOptions);
       // One pill per source that reported a BPM, with its value. The one
       // for the current source is highlighted. Click any of them: that
-      // value becomes THE track's BPM and is validated by you (validation
-      // is always yours, never automatic).
+      // value becomes THE track's BPM and is validated by you.
       const tdSrc = cell('src', '');
-      const sourceOrder = { manual: 0, beatport: 1, youtube: 2, deezer: 3, getsongbpm: 4 };
+      const sourceOrder = { manual: 0, beatport: 1, youtube: 2 };
       const sources = (t.sources || []).slice()
         .sort((a, b) => (sourceOrder[a.source] ?? 9) - (sourceOrder[b.source] ?? 9));
       for (const f of sources) {
@@ -292,11 +334,13 @@ function render() {
         ok.addEventListener('click', () => confirmTrack(t.id));
         tdRev.appendChild(ok);
       } else if (t.verified) {
-        // Validated: you confirmed it (the ✓ is never automatic).
+        // Validated either by a Discogs + Beatport match or by the user.
         const v = document.createElement('span');
         v.className = 'verified';
         v.textContent = '✓ validated';
-        v.title = 'BPM validated by you';
+        v.title = t.source === 'beatport'
+          ? 'Automatically confirmed by matching Discogs with Beatport'
+          : 'BPM validated by you';
         tdRev.appendChild(v);
       } else if (t.bpm !== null) {
         // Has a BPM but nobody validated it: one click marks it good.
@@ -315,14 +359,16 @@ function render() {
 
   document.getElementById('empty').hidden = visible > 0;
   const summary = document.getElementById('summary');
-  if (total && validated === total) {
+  if (total && validated === total && keyPending === 0 && keyDoubtful === 0) {
     summary.innerHTML = '<span class="done">collection complete: ' +
-      total + '/' + total + ' BPM validated ✓</span>';
+      total + '/' + total + ' BPM validated · keys analyzed ✓</span>';
   } else {
     const parts = [validated + '/' + total + ' validated'];
     if (pending) parts.push(pending + ' without BPM');
-    if (doubtful) parts.push(doubtful + ' doubtful');
-    if (unvalidated - doubtful > 0) parts.push((unvalidated - doubtful) + ' unvalidated');
+    if (keyPending) parts.push(keyPending + ' without key');
+    if (bpmDoubtful) parts.push(bpmDoubtful + ' doubtful BPM');
+    if (keyDoubtful) parts.push(keyDoubtful + ' doubtful key');
+    if (unvalidated - bpmDoubtful > 0) parts.push((unvalidated - bpmDoubtful) + ' unvalidated');
     summary.textContent = parts.join(' · ');
   }
 }
@@ -391,11 +437,54 @@ async function onKeyChange(e) {
       if (t.id == inp.dataset.id) {
         t.key = res.key; t.camelot = res.camelot;
         t.key_source = res.key ? 'manual' : null;
+        t.key_alt = null; t.key_alt_camelot = '';
+        t.key_review = 0; t.key_verified = res.key ? 1 : 0; t.key_strength = null;
+        t.key_sources = (t.key_sources || []).filter(f => f.source !== 'manual');
+        if (res.key) t.key_sources.push({
+          source: 'manual', key: res.key, camelot: res.camelot,
+          strength: null, detail: null,
+        });
       }
   inp.value = res.camelot;
   inp.title = res.key ? 'Key ' + res.key + ' (manual)' : 'Key: Camelot ("8A") or musical ("Am")';
   inp.classList.add('saved');
   setTimeout(() => inp.classList.remove('saved'), 900);
+  render();
+}
+
+async function useKeySource(id, source) {
+  const r = await fetch('/api/key-source', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: id, source: source }),
+  });
+  if (!r.ok) return;
+  const res = await r.json();
+  for (const release of data.releases)
+    for (const t of release.tracks)
+      if (t.id == id) {
+        const chosen = (t.key_sources || []).find(f => f.source === source);
+        t.key = res.key; t.camelot = res.camelot; t.key_source = source;
+        t.key_alt = null; t.key_alt_camelot = ''; t.key_review = 0;
+        t.key_verified = 1; t.key_strength = chosen ? chosen.strength : null;
+      }
+  render();
+}
+
+async function confirmKey(id) {
+  const r = await fetch('/api/key-confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: id }),
+  });
+  if (!r.ok) return;
+  for (const release of data.releases)
+    for (const t of release.tracks)
+      if (t.id == id) {
+        t.key_alt = null; t.key_alt_camelot = '';
+        t.key_review = 0; t.key_verified = 1;
+      }
+  render();
 }
 
 async function confirmTrack(id) {
@@ -413,6 +502,7 @@ async function confirmTrack(id) {
 
 document.getElementById('search').addEventListener('input', render);
 document.getElementById('onlyMissing').addEventListener('change', render);
+document.getElementById('onlyMissingKey').addEventListener('change', render);
 document.getElementById('onlyDoubtful').addEventListener('change', render);
 document.getElementById('onlyUnvalidated').addEventListener('change', render);
 
@@ -443,12 +533,29 @@ def read_data():
             {"source": f["source"], "bpm": f["bpm"], "detail": f["detail"]}
         )
 
+    cursor.execute(
+        "SELECT track_id, source, key, strength, detail"
+        " FROM key_sources WHERE key IS NOT NULL"
+    )
+    key_sources_by_track = {}
+    for f in cursor.fetchall():
+        key_sources_by_track.setdefault(f["track_id"], []).append(
+            {
+                "source": f["source"],
+                "key": f["key"],
+                "camelot": to_camelot(f["key"]),
+                "strength": f["strength"],
+                "detail": f["detail"],
+            }
+        )
+
     cursor.execute("SELECT * FROM releases ORDER BY artist, title")
     releases = []
     for release in cursor.fetchall():
         cursor.execute(
             "SELECT id, position, title, artist, duration_display, bpm, bpm_source,"
-            "       bpm_alt, bpm_needs_review, bpm_verified, key, key_source"
+            "       bpm_alt, bpm_needs_review, bpm_verified, key, key_source,"
+            "       key_alt, key_needs_review, key_verified, key_strength"
             " FROM tracks WHERE release_id = ? ORDER BY id",
             (release["release_id"],),
         )
@@ -468,6 +575,12 @@ def read_data():
                 "key": t["key"],
                 "camelot": to_camelot(t["key"]),
                 "key_source": t["key_source"],
+                "key_sources": key_sources_by_track.get(t["id"], []),
+                "key_alt": t["key_alt"],
+                "key_alt_camelot": to_camelot(t["key_alt"]),
+                "key_review": t["key_needs_review"] or 0,
+                "key_verified": t["key_verified"] or 0,
+                "key_strength": t["key_strength"],
             }
             for t in cursor.fetchall()
         ]
@@ -538,8 +651,49 @@ def save_key(track_id, key):
     it's left empty (and the next enrich_beatport.py can fill it in)."""
     conn = get_connection()
     conn.execute(
-        "UPDATE tracks SET key = ?, key_source = ? WHERE id = ?",
-        (key, "manual" if key is not None else None, track_id),
+        "UPDATE tracks SET key = ?, key_source = ?, key_alt = NULL,"
+        " key_needs_review = 0, key_verified = ?, key_strength = NULL WHERE id = ?",
+        (key, "manual" if key is not None else None, int(key is not None), track_id),
+    )
+    if key is not None:
+        record_key_source(conn, track_id, "manual", key)
+    else:
+        conn.execute(
+            "DELETE FROM key_sources WHERE track_id = ? AND source = 'manual'",
+            (track_id,),
+        )
+    conn.commit()
+    conn.close()
+
+
+def use_key_source(track_id, source):
+    """Chooses one detected key and marks the user's choice as verified."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT key, strength FROM key_sources"
+        " WHERE track_id = ? AND source = ? AND key IS NOT NULL",
+        (track_id, source),
+    ).fetchone()
+    if row is None:
+        conn.close()
+        return None
+    conn.execute(
+        "UPDATE tracks SET key = ?, key_source = ?, key_alt = NULL,"
+        " key_needs_review = 0, key_verified = 1, key_strength = ? WHERE id = ?",
+        (row["key"], source, row["strength"], track_id),
+    )
+    conn.commit()
+    conn.close()
+    return row["key"]
+
+
+def confirm_key(track_id):
+    """Confirms the currently selected automatic key."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE tracks SET key_alt = NULL, key_needs_review = 0,"
+        " key_verified = 1 WHERE id = ? AND key IS NOT NULL",
+        (track_id,),
     )
     conn.commit()
     conn.close()
@@ -590,7 +744,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        if self.path not in ("/api/bpm", "/api/confirm", "/api/key", "/api/source"):
+        if self.path not in (
+            "/api/bpm",
+            "/api/confirm",
+            "/api/key",
+            "/api/source",
+            "/api/key-source",
+            "/api/key-confirm",
+        ):
             self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -610,6 +771,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(400)  # that source has no BPM for this track
                 return
             self.respond(json.dumps({"ok": True, "bpm": bpm}))
+            return
+
+        if self.path == "/api/key-source":
+            source = str(request.get("source") or "")
+            key = use_key_source(track_id, source)
+            if key is None:
+                self.send_error(400)
+                return
+            self.respond(
+                json.dumps({"ok": True, "key": key, "camelot": to_camelot(key)})
+            )
+            return
+
+        if self.path == "/api/key-confirm":
+            confirm_key(track_id)
+            self.respond(json.dumps({"ok": True}))
             return
 
         if self.path == "/api/key":
@@ -652,7 +829,7 @@ def main():
         )
         return
     url = f"http://localhost:{PORT}"
-    print(f"BPM editor open at {url}")
+    print(f"BPM & key editor open at {url}")
     print("(if it didn't open on its own, go to that address in your browser)")
     print("To stop: Ctrl+C\n")
     threading.Timer(0.6, webbrowser.open, [url]).start()

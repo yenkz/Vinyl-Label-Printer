@@ -1,7 +1,7 @@
 """
 fetch_discogs.py — STEP 1
 
-Connects to your Discogs account and imports ALL records from your collection
+Connects to your Discogs account and imports NEW records from your collection
 (all vinyl records, regardless of which folder in Discogs they're stored in)
 and saves for each: artist, title, year, label, the list of tracks with their
 position (A1, A2...), title and duration, and the cover of the actual vinyl
@@ -9,17 +9,20 @@ edition (Discogs is the master source: anything missing here is filled in later
 by Beatport, Bandcamp, and Spotify).
 
 How to run it:
-    python fetch_discogs.py
+    python fetch_discogs.py          # new records only (default)
+    python fetch_discogs.py --all    # refresh the whole collection
 
-You can run it as many times as you like: already-saved records are updated
-(without losing any BPM data you've entered), new ones are added, and records
-you've removed from your collection are deleted.
+You can run it as many times as you like: already-saved records are skipped,
+new ones are added, and records you've removed from your collection are
+deleted. Use --all when you deliberately want to refresh saved Discogs data;
+your BPM, key, ISRC, and downloaded-audio data are preserved.
 
-Note: Discogs limits requests to 60 per minute, so with a large collection
-this step takes a while — roughly 1 second per record.
+Note: Discogs limits requests to 60 per minute, so detailed imports take
+roughly 1 second per new record (or per record with --all).
 """
 
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -54,6 +57,12 @@ def with_retry(function, attempts=3):
 
 
 def main():
+    refresh_all = "--all" in sys.argv[1:]
+    unknown = [arg for arg in sys.argv[1:] if arg != "--all"]
+    if unknown:
+        print(__doc__)
+        return
+
     if not config.DISCOGS_USER_TOKEN:
         print(
             "Your Discogs token is missing.\n"
@@ -82,17 +91,29 @@ def main():
 
     conn = get_connection()
     cursor = conn.cursor()
+    existing_ids = {
+        row["release_id"] for row in cursor.execute("SELECT release_id FROM releases")
+    }
 
     errors = []
     collection_ids = []
+    imported = 0
+    refreshed = 0
+    skipped = 0
 
     for i, item in enumerate(all_folder.releases, start=1):
+        fetched_details = False
         try:
             release = item.release
+            collection_ids.append(release.id)
+            if not refresh_all and release.id in existing_ids:
+                skipped += 1
+                continue
+
             # The Discogs request happens here (with retry
             # if we hit the rate limit).
             with_retry(release.refresh)
-            collection_ids.append(release.id)
+            fetched_details = True
 
             artist = (
                 " / ".join(clean_artist(a.name) for a in release.artists)
@@ -100,7 +121,8 @@ def main():
                 else "Unknown"
             )
 
-            print(f"[{i}/{total}] {artist} — {release.title}")
+            action = "refreshing" if release.id in existing_ids else "new"
+            print(f"[{i}/{total}] {artist} — {release.title} ({action})")
 
             # Record label and catalog number (for the label), plus the
             # vinyl release date (more precise than year alone, when
@@ -151,7 +173,9 @@ def main():
             # each time you update the collection.
             cursor.execute(
                 "SELECT position, bpm, bpm_source, bpm_alt, bpm_needs_review, bpm_verified,"
-                "       key, key_source, isrc, duration_display"
+                "       key, key_source, key_alt, key_needs_review, key_verified,"
+                "       key_strength, isrc, duration_display,"
+                "       audio_path, audio_format, audio_source"
                 " FROM tracks WHERE release_id = ?",
                 (release.id,),
             )
@@ -173,7 +197,35 @@ def main():
                 )
 
             cursor.execute(
+                "SELECT tracks.position, key_sources.source, key_sources.key,"
+                "       key_sources.strength, key_sources.detail"
+                " FROM key_sources JOIN tracks ON tracks.id = key_sources.track_id"
+                " WHERE tracks.release_id = ?",
+                (release.id,),
+            )
+            previous_key_sources = {}
+            for row in cursor.fetchall():
+                previous_key_sources.setdefault(row["position"], []).append(
+                    (row["source"], row["key"], row["strength"], row["detail"])
+                )
+
+            cursor.execute(
                 "DELETE FROM bpm_sources WHERE track_id IN"
+                " (SELECT id FROM tracks WHERE release_id = ?)",
+                (release.id,),
+            )
+            cursor.execute(
+                "DELETE FROM key_sources WHERE track_id IN"
+                " (SELECT id FROM tracks WHERE release_id = ?)",
+                (release.id,),
+            )
+            cursor.execute(
+                "DELETE FROM pending_downloads WHERE track_id IN"
+                " (SELECT id FROM tracks WHERE release_id = ?)",
+                (release.id,),
+            )
+            cursor.execute(
+                "DELETE FROM failed_downloads WHERE track_id IN"
                 " (SELECT id FROM tracks WHERE release_id = ?)",
                 (release.id,),
             )
@@ -206,14 +258,20 @@ def main():
                     """
                     INSERT INTO tracks (release_id, position, title, artist, duration_display,
                                         bpm, bpm_source, bpm_alt, bpm_needs_review, bpm_verified,
-                                        key, key_source, isrc)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        key, key_source, key_alt, key_needs_review, key_verified,
+                                        key_strength, isrc,
+                                        audio_path, audio_format, audio_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         release.id, track.position, track.title, track_artist, duration,
                         previous.get("bpm"), previous.get("bpm_source"), previous.get("bpm_alt"),
                         previous.get("bpm_needs_review") or 0, previous.get("bpm_verified") or 0,
-                        previous.get("key"), previous.get("key_source"), previous.get("isrc"),
+                        previous.get("key"), previous.get("key_source"), previous.get("key_alt"),
+                        previous.get("key_needs_review") or 0, previous.get("key_verified") or 0,
+                        previous.get("key_strength"), previous.get("isrc"),
+                        previous.get("audio_path"), previous.get("audio_format"),
+                        previous.get("audio_source"),
                     ),
                 )
                 new_track_id = cursor.lastrowid
@@ -223,7 +281,21 @@ def main():
                         " VALUES (?, ?, ?, ?)",
                         (new_track_id, source, bpm, detail),
                     )
+                for source, key, strength, detail in previous_key_sources.get(track.position, []):
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO key_sources"
+                        " (track_id, source, key, strength, detail) VALUES (?, ?, ?, ?, ?)",
+                        (new_track_id, source, key, strength, detail),
+                    )
 
+            # A full Discogs refresh may have changed the track list. Make all
+            # downstream steps pending for that release again. New releases
+            # have no workflow rows yet, so they are already pending.
+            if release.id in existing_ids:
+                cursor.execute("DELETE FROM workflow_steps WHERE release_id = ?", (release.id,))
+                refreshed += 1
+            else:
+                imported += 1
             conn.commit()
 
         except Exception as e:
@@ -233,9 +305,10 @@ def main():
             errors.append((getattr(item, "id", "?"), str(e)))
             print(f"   -> Error with this record, continuing: {e}")
 
-        # Discogs allows 60 requests per minute. This pause prevents
-        # temporary blocking if you have a large collection.
-        time.sleep(1.1)
+        # Discogs allows 60 requests per minute. Only detailed refreshes cost
+        # that request; skipped existing records need no pause.
+        if fetched_details:
+            time.sleep(1.1)
 
     # If the traversal completed without errors, we delete records that
     # are no longer in your Discogs collection (you sold them, etc.).
@@ -248,7 +321,26 @@ def main():
             collection_ids,
         )
         cursor.execute(
+            f"DELETE FROM key_sources WHERE track_id IN"
+            f" (SELECT id FROM tracks WHERE release_id NOT IN ({placeholders}))",
+            collection_ids,
+        )
+        cursor.execute(
+            f"DELETE FROM pending_downloads WHERE track_id IN"
+            f" (SELECT id FROM tracks WHERE release_id NOT IN ({placeholders}))",
+            collection_ids,
+        )
+        cursor.execute(
+            f"DELETE FROM failed_downloads WHERE track_id IN"
+            f" (SELECT id FROM tracks WHERE release_id NOT IN ({placeholders}))",
+            collection_ids,
+        )
+        cursor.execute(
             f"DELETE FROM tracks WHERE release_id NOT IN ({placeholders})",
+            collection_ids,
+        )
+        cursor.execute(
+            f"DELETE FROM workflow_steps WHERE release_id NOT IN ({placeholders})",
             collection_ids,
         )
         cursor.execute(
@@ -262,7 +354,10 @@ def main():
     conn.close()
 
     print("\n" + "=" * 50)
-    print(f"Done. {len(collection_ids)} records saved successfully.")
+    print(
+        f"Done. {imported} new records imported, {refreshed} refreshed, "
+        f"{skipped} existing records skipped."
+    )
     if errors:
         print(f"{len(errors)} records had errors (see above).")
     print("Next step: python enrich_beatport.py  (BPM and tonality)")

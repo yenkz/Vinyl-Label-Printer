@@ -6,6 +6,7 @@ Nothing here is meant to be run directly.
 
 import difflib
 import re
+import unicodedata
 from pathlib import Path
 
 import requests
@@ -15,11 +16,17 @@ import config
 COVERS_DIR = Path(__file__).parent / config.COVERS_DIR
 
 
+def ascii_fold(text):
+    """Replaces accented letters with their plain ASCII base ("Étienne" ->
+    "Etienne"), dropping characters that have no ASCII equivalent."""
+    return unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode()
+
+
 def normalize(text):
     """Normalizes a title to lowercase with only letters/numbers, allowing
     comparison of "Concrete Jungle (Juaan Remix)" with
-    "Concrete Jungle - Juaan Remix" without punctuation issues."""
-    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+    "Concrete Jungle - Juaan Remix" without punctuation or accent issues."""
+    return re.sub(r"[^a-z0-9]", "", ascii_fold(text).lower())
 
 
 def looks_similar(a, b, threshold=0.65):

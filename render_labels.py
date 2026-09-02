@@ -1,5 +1,5 @@
 """
-render_labels.py — STEP 4
+render_labels.py — STEP 7
 
 Generates ONE image per vinyl record (not one per track), with the cover,
 label, and release date in the header, and a table of all its tracks:
@@ -14,11 +14,18 @@ comes out text-only, like before.
 BPM and key are in bold because that's what you'll be reading in the dark
 in the booth.
 
+A label is generated only when every track on the record has a BPM validated
+in edit_bpm.py. Records with missing or unvalidated BPMs remain pending and
+will be picked up by the next run after you validate them. Every run also
+compares the current database-backed rendering with the image on disk: changed
+labels are replaced, while identical ones are left untouched.
+
 Images are saved in the labels_output/ folder, with names like
 "Artist - Record (id).png", ready for print_labels.py to send to the printer.
 
 How to run it:
-    python render_labels.py              # generate ALL labels
+    python render_labels.py              # generate labels for new records
+    python render_labels.py --all        # regenerate ALL labels
     python render_labels.py aphex        # only records containing "aphex"
     python render_labels.py aphex --view # also open them in Preview
 """
@@ -32,7 +39,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 import config
 from common import to_camelot
-from db import get_connection, init_db
+from db import get_connection, init_db, mark_workflow_step
 
 OUTPUT_DIR = Path(__file__).parent / config.OUTPUT_DIR
 
@@ -192,33 +199,66 @@ def render_release(release, tracks, font_title, font_text, font_bpm, font_meta):
     return img
 
 
+def same_image(rendered, path):
+    """True when an existing PNG has exactly the pixels we would render now.
+
+    Comparing pixels instead of timestamps catches every visible database
+    change from edit_bpm.py (BPM, key, doubtful marker), while also detecting
+    layout/font/cover changes. A missing, unreadable, or corrupt image is stale.
+    """
+    try:
+        with Image.open(path) as existing:
+            existing.load()
+            return (
+                existing.mode == rendered.mode
+                and existing.size == rendered.size
+                and existing.tobytes() == rendered.tobytes()
+            )
+    except (OSError, ValueError):
+        return False
+
+
 def main():
     arguments = sys.argv[1:]
     open_preview = "--view" in arguments
+    process_all = "--all" in arguments
     filter_text = next((a.lower() for a in arguments if not a.startswith("--")), "")
+    unknown_options = [a for a in arguments if a.startswith("--") and a not in ("--view", "--all")]
+    if unknown_options:
+        print(__doc__)
+        return
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     init_db()  # in case you haven't run any other step yet
     conn = get_connection()
     cursor = conn.cursor()
+    # We inspect every record because an already-rendered label may have changed
+    # in edit_bpm.py. Pixel comparison below keeps this incremental: unchanged
+    # files are not rewritten. A named filter or --all remains an explicit force.
     cursor.execute("SELECT * FROM releases ORDER BY artist, title")
     releases = cursor.fetchall()
 
     if not releases:
         print("Your collection is empty. Run first: python fetch_discogs.py")
+        conn.close()
         return
 
     if filter_text:
         releases = [r for r in releases if filter_text in f"{r['artist']} {r['title']}".lower()]
         if not releases:
             print(f"No record in your collection contains '{filter_text}'.")
+            conn.close()
             return
 
     font_title, font_text, font_bpm, font_meta = load_fonts()
 
     generated = 0
+    updated = 0
+    unchanged = 0
+    waiting_for_validation = 0
     generated_paths = []
+    force_render = process_all or bool(filter_text)
     for release in releases:
         cursor.execute(
             "SELECT * FROM tracks WHERE release_id = ? ORDER BY id",
@@ -228,24 +268,68 @@ def main():
         if not tracks:
             continue
 
-        img = render_release(release, tracks, font_title, font_text, font_bpm, font_meta)
+        validated = sum(
+            1 for track in tracks
+            if track["bpm"] is not None and track["bpm_verified"]
+        )
+        if validated != len(tracks):
+            waiting_for_validation += 1
+            print(
+                f"Waiting for validation: {release['artist']} - {release['title']} "
+                f"({validated}/{len(tracks)} tracks validated)"
+            )
+            # Do not mark the render workflow step: once validation is complete,
+            # a normal `make render` must see this release again.
+            continue
 
         name = file_name(release)
-        img.save(OUTPUT_DIR / name)
-        generated_paths.append(OUTPUT_DIR / name)
+        output_path = OUTPUT_DIR / name
+        printed_path = OUTPUT_DIR / "printed" / name
+
+        img = render_release(release, tracks, font_title, font_text, font_bpm, font_meta)
+        existing_path = (
+            output_path if output_path.exists()
+            else printed_path if printed_path.exists()
+            else None
+        )
+        if not force_render and existing_path and same_image(img, existing_path):
+            mark_workflow_step(conn, release["release_id"], "render")
+            conn.commit()
+            unchanged += 1
+            continue
+
+        img.save(output_path)
+        mark_workflow_step(conn, release["release_id"], "render")
+        conn.commit()
+        generated_paths.append(output_path)
         generated += 1
-        print(f"Generated: {name}")
+        if existing_path:
+            updated += 1
+            print(f"Updated: {name}")
+        else:
+            print(f"Generated: {name}")
 
     conn.close()
-    print(f"\nDone. {generated} labels generated in {OUTPUT_DIR}/")
+    print(
+        f"\nDone. {generated} labels written in {OUTPUT_DIR}/ "
+        f"({updated} updated, {generated - updated} new, {unchanged} unchanged)."
+    )
+    if waiting_for_validation:
+        print(
+            f"{waiting_for_validation} records are still waiting for 100% BPM "
+            "validation in `make edit`."
+        )
 
     if open_preview and generated_paths:
         # Open the images in Preview (Mac) to check them before
         # wasting a label.
         subprocess.run(["open", *map(str, generated_paths)])
 
-    print("Next step: python print_labels.py --test  (to see what would print)")
-    print("        or: python print_labels.py         (to print)")
+    if generated:
+        print("Next step: python print_labels.py --test  (to see what would print)")
+        print("        or: python print_labels.py         (to print)")
+    elif waiting_for_validation:
+        print("Next step: make edit  (validate every track, then run make render again)")
 
 
 if __name__ == "__main__":

@@ -6,10 +6,9 @@ which in electronic music sometimes locks onto the wrong beat:
 it measures 89 where the real tempo is 134 (a 2/3 error that range
 adjustment can't fix, because both numbers are valid tempos).
 
-This script takes all tracks with automatic BPM that you haven't
-re-measured with the new version (the ones from the old version and also
-ones from Deezer), downloads the audio again, and re-measures them with
-both detectors:
+This script takes tracks measured by the old analysis version that you haven't
+re-measured with the new version, downloads the audio again, and re-measures
+them with both detectors:
 
   - if the new measurement matches the saved one, the re-measurement
     is noted in bpm_sources: in the editor you'll see both sources
@@ -61,7 +60,7 @@ def main():
                releases.catno
         FROM tracks
         JOIN releases ON releases.release_id = tracks.release_id
-        WHERE tracks.bpm_source IN ('youtube', 'deezer')
+        WHERE tracks.bpm_source = 'youtube'
           AND tracks.bpm IS NOT NULL
           AND tracks.bpm_needs_review = 0
           AND tracks.bpm_verified = 0
@@ -85,10 +84,12 @@ def main():
         for i, row in enumerate(pending, start=1):
             label = f"[{i}/{len(pending)}] {row['artist']} - {row['title']}"
             try:
-                new, _, _, detail = analyze_track(
+                result, detail = analyze_track(
                     row["artist"], row["title"],
                     parse_duration(row["duration_display"]), tmpdir,
                     row["catno"],
+                    need_bpm=True,
+                    need_key=False,
                 )
             except KeyboardInterrupt:
                 print("\nStopped. What's been audited is saved.")
@@ -97,6 +98,7 @@ def main():
                 print(f"{label}\n   -> error, continuing: {e}")
                 continue
 
+            new = result.bpm
             if new is None:
                 print(f"{label}\n   -> couldn't re-measure ({detail}), keeping as is")
             elif abs(new - row["bpm"]) <= TOLERANCE_BPM:
