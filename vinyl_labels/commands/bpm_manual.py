@@ -3,13 +3,13 @@ bpm_manual.py — STEP 6 alternative (CSV spreadsheet workflow)
 
 Used to manually enter BPMs that automatic search didn't find. Works in two modes:
 
-    python bpm_manual.py export
+    python -m vinyl_labels export
         -> Creates a bpm_pending.csv file with all tracks that still don't have
            BPM. Open it in Excel/Numbers/Google Sheets, fill the "bpm" column
            by hand (you can search the track on Shazam, Tunebat, or listen with
            a metronome), and save it as CSV again.
 
-    python bpm_manual.py import
+    python -m vinyl_labels import
         -> Reads that same bpm_pending.csv file and loads the BPMs you've filled
            in back into the database.
 
@@ -17,13 +17,13 @@ You can alternate export/fill/import as many times as you want, as you review
 records.
 """
 
+import argparse
 import csv
-import sys
-from pathlib import Path
 
-from db import get_connection, init_db, record_bpm_source
+from vinyl_labels.db import get_connection, init_db, record_bpm_source
+from vinyl_labels.paths import PROJECT_ROOT
 
-CSV_PATH = Path(__file__).parent / "bpm_pending.csv"
+CSV_PATH = PROJECT_ROOT / "bpm_pending.csv"
 
 
 def export_csv():
@@ -38,7 +38,7 @@ def export_csv():
         FROM tracks
         JOIN releases ON releases.release_id = tracks.release_id
         WHERE tracks.bpm IS NULL
-        ORDER BY releases.artist, releases.title, tracks.position
+        ORDER BY releases.artist, releases.title, tracks.sort_order, tracks.id
         """
     )
     rows = cursor.fetchall()
@@ -46,7 +46,7 @@ def export_csv():
 
     if not rows:
         print("No pending BPM tracks. Everything's complete!")
-        return
+        return 0
 
     # utf-8-sig: the "sig" makes Excel read accents and ñ correctly.
     with open(CSV_PATH, "w", newline="", encoding="utf-8-sig") as f:
@@ -59,13 +59,14 @@ def export_csv():
 
     print(f"Exported: {CSV_PATH}")
     print(f"{len(rows)} pending tracks. Fill the 'bpm' column and then run:")
-    print("    python bpm_manual.py import")
+    print("    python -m vinyl_labels import")
+    return 0
 
 
 def import_csv():
     if not CSV_PATH.exists():
-        print(f"Can't find {CSV_PATH}. Run first: python bpm_manual.py export")
-        return
+        print(f"Can't find {CSV_PATH}. Run first: python -m vinyl_labels export")
+        return 1
 
     init_db()  # in case database is from an older version
     conn = get_connection()
@@ -79,10 +80,14 @@ def import_csv():
             if not bpm_text:
                 continue  # you haven't filled it yet, leave it for next time
 
+            track_label = row.get("track_id") or "?"
             try:
                 bpm = float(bpm_text)
-            except ValueError:
-                print(f"   Invalid BPM for track_id {row['track_id']}: '{bpm_text}' (skipping)")
+                track_id = int(track_label)
+                if not 30 <= bpm <= 300:
+                    raise ValueError(bpm)
+            except (TypeError, ValueError):
+                print(f"   Invalid BPM for track_id {track_label}: '{bpm_text}' (skipping)")
                 continue
 
             # Entering it manually IS the manual validation: it gets the checkmark,
@@ -90,23 +95,30 @@ def import_csv():
             cursor.execute(
                 "UPDATE tracks SET bpm = ?, bpm_source = 'manual', bpm_alt = NULL,"
                 " bpm_needs_review = 0, bpm_verified = 1 WHERE id = ?",
-                (bpm, row["track_id"]),
+                (bpm, track_id),
             )
-            record_bpm_source(conn, int(row["track_id"]), "manual", bpm)
+            if cursor.rowcount != 1:
+                print(f"   Unknown track_id {track_id} (skipping)")
+                continue
+            record_bpm_source(conn, track_id, "manual", bpm)
             updated += 1
 
     conn.commit()
     conn.close()
 
     print(f"Imported {updated} manually entered BPMs.")
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="python -m vinyl_labels",
+        description="Export or import manual BPM values.",
+    )
+    parser.add_argument("mode", choices=("export", "import"))
+    args = parser.parse_args(argv)
+    return export_csv() if args.mode == "export" else import_csv()
 
 
 if __name__ == "__main__":
-    modo = sys.argv[1] if len(sys.argv) > 1 else None
-
-    if modo == "export":
-        export_csv()
-    elif modo == "import":
-        import_csv()
-    else:
-        print(__doc__)
+    raise SystemExit(main())

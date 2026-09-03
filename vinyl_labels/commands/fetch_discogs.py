@@ -9,8 +9,8 @@ edition (Discogs is the master source: anything missing here is filled in later
 by Beatport, Bandcamp, and Spotify).
 
 How to run it:
-    python fetch_discogs.py          # new records only (default)
-    python fetch_discogs.py --all    # refresh the whole collection
+    python -m vinyl_labels fetch          # new records only (default)
+    python -m vinyl_labels fetch --all    # refresh the whole collection
 
 You can run it as many times as you like: already-saved records are skipped,
 new ones are added, and records you've removed from your collection are
@@ -21,17 +21,19 @@ Note: Discogs limits requests to 60 per minute, so detailed imports take
 roughly 1 second per new record (or per record with --all).
 """
 
+import argparse
+import difflib
 import re
-import sys
 import time
-from pathlib import Path
 
 import discogs_client
 from discogs_client.exceptions import HTTPError
 
-import config
-from common import download_cover
-from db import get_connection, init_db
+from vinyl_labels import config
+from vinyl_labels import db as database
+from vinyl_labels.common import download_cover, normalize
+from vinyl_labels.db import get_connection, init_db
+from vinyl_labels.paths import PROJECT_ROOT
 
 
 def clean_artist(name):
@@ -39,6 +41,39 @@ def clean_artist(name):
     with the same name. On a label that adds no value and breaks BPM search,
     so we remove it."""
     return re.sub(r"\s\(\d+\)$", "", name)
+
+
+def same_track_identity(previous, title, artist):
+    """Whether refreshed Discogs data still describes the same recording.
+
+    Position alone is not an identity: Discogs edits sometimes rearrange a
+    tracklist.  We retain user-entered/enriched data only when the title and
+    per-track artist still match closely.  Small spelling corrections are
+    accepted; a genuinely different song occupying the same position is not.
+    """
+    old_title = normalize(previous["title"])
+    new_title = normalize(title)
+    titles_match = bool(old_title and new_title) and (
+        old_title == new_title
+        or difflib.SequenceMatcher(None, old_title, new_title).ratio() >= 0.9
+    )
+    old_artist = normalize(previous["artist"])
+    new_artist = normalize(artist)
+    artists_match = old_artist == new_artist
+    return titles_match and artists_match
+
+
+def delete_track(cursor, track_id):
+    """Deletes one track and every dependent row on legacy databases too."""
+    for table in (
+        "bpm_sources",
+        "key_sources",
+        "pending_downloads",
+        "failed_downloads",
+        "track_workflow_steps",
+    ):
+        cursor.execute(f"DELETE FROM {table} WHERE track_id = ?", (track_id,))
+    cursor.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
 
 
 def with_retry(function, attempts=3):
@@ -56,12 +91,17 @@ def with_retry(function, attempts=3):
                 raise
 
 
-def main():
-    refresh_all = "--all" in sys.argv[1:]
-    unknown = [arg for arg in sys.argv[1:] if arg != "--all"]
-    if unknown:
-        print(__doc__)
-        return
+def parse_arguments(arguments=None):
+    parser = argparse.ArgumentParser(
+        prog="python -m vinyl_labels fetch",
+        description="Import a Discogs vinyl collection.",
+    )
+    parser.add_argument("--all", action="store_true", help="refresh existing releases")
+    return parser.parse_args(arguments)
+
+
+def main(arguments=None):
+    refresh_all = parse_arguments(arguments).all
 
     if not config.DISCOGS_USER_TOKEN:
         print(
@@ -70,9 +110,12 @@ def main():
             "DISCOGS_USER_TOKEN with the token from\n"
             "https://www.discogs.com/settings/developers"
         )
-        return
+        return 2
 
     init_db()  # create tables on first run
+    if refresh_all and database.DB_PATH.exists():
+        backup = database.backup_database()
+        print(f"Safety backup created: {backup}")
 
     print("Connecting to Discogs...")
     d = discogs_client.Client(
@@ -100,9 +143,12 @@ def main():
     imported = 0
     refreshed = 0
     skipped = 0
+    traversed = 0
 
     for i, item in enumerate(all_folder.releases, start=1):
+        traversed += 1
         fetched_details = False
+        savepoint_open = False
         try:
             release = item.release
             collection_ids.append(release.id)
@@ -133,6 +179,39 @@ def main():
                 catalog_number = None
             release_date = release.data.get("released") or None
 
+            # Resolve the complete incoming tracklist before changing the
+            # database. Accessing a lazy Discogs object can itself fail; that
+            # must leave the previously saved release completely untouched.
+            incoming_tracks = []
+            for track in release.tracklist:
+                if not track.position:
+                    continue
+                track_artist = (
+                    " / ".join(clean_artist(a.name) for a in track.artists)
+                    if track.artists
+                    else None
+                )
+                if track_artist == artist:
+                    track_artist = None
+                incoming_tracks.append(
+                    {
+                        "position": track.position,
+                        "title": track.title,
+                        "artist": track_artist,
+                        "duration": track.duration or "",
+                    }
+                )
+
+            if not incoming_tracks:
+                raise ValueError(
+                    "Discogs returned no positioned tracks; existing data was left untouched"
+                )
+
+            # One bad release must never leak half-applied changes into the
+            # commit of the next successful release.
+            cursor.execute("SAVEPOINT release_refresh")
+            savepoint_open = True
+
             cursor.execute(
                 """
                 INSERT INTO releases (release_id, artist, title, year, label, catno, released)
@@ -155,7 +234,7 @@ def main():
             # delete it from covers/).
             cursor.execute("SELECT cover_path FROM releases WHERE release_id = ?", (release.id,))
             current_cover = cursor.fetchone()["cover_path"]
-            if not current_cover or not (Path(__file__).parent / current_cover).exists():
+            if not current_cover or not (PROJECT_ROOT / current_cover).exists():
                 images = release.data.get("images") or []
                 primary = [im for im in images if im.get("type") == "primary"] or images
                 if primary and primary[0].get("uri"):
@@ -167,141 +246,78 @@ def main():
                         )
                         print("   cover downloaded from Discogs")
 
-            # Before replacing tracks, save what they already had and isn't
-            # from Discogs (BPM and its validation status, key, ISRC,
-            # durations filled in from other sources) so we don't lose it
-            # each time you update the collection.
+            # Keep stable track IDs when Discogs still describes the same
+            # recording. This preserves BPM/key/source/download relations
+            # without detaching and recreating all dependent rows.
             cursor.execute(
-                "SELECT position, bpm, bpm_source, bpm_alt, bpm_needs_review, bpm_verified,"
-                "       key, key_source, key_alt, key_needs_review, key_verified,"
-                "       key_strength, isrc, duration_display,"
-                "       audio_path, audio_format, audio_source"
-                " FROM tracks WHERE release_id = ?",
+                "SELECT * FROM tracks WHERE release_id = ?",
                 (release.id,),
             )
-            previous_tracks = {row["position"]: dict(row) for row in cursor.fetchall()}
+            old_tracks = cursor.fetchall()
+            previous_by_position = {row["position"]: row for row in old_tracks}
+            retained_ids = set()
 
-            # Same with the source details (bpm_sources): since tracks get
-            # recreated with new IDs, we save them by position and reattach
-            # them to the new ID when inserting.
-            cursor.execute(
-                "SELECT tracks.position, bpm_sources.source, bpm_sources.bpm, bpm_sources.detail"
-                " FROM bpm_sources JOIN tracks ON tracks.id = bpm_sources.track_id"
-                " WHERE tracks.release_id = ?",
-                (release.id,),
-            )
-            previous_sources = {}
-            for row in cursor.fetchall():
-                previous_sources.setdefault(row["position"], []).append(
-                    (row["source"], row["bpm"], row["detail"])
-                )
-
-            cursor.execute(
-                "SELECT tracks.position, key_sources.source, key_sources.key,"
-                "       key_sources.strength, key_sources.detail"
-                " FROM key_sources JOIN tracks ON tracks.id = key_sources.track_id"
-                " WHERE tracks.release_id = ?",
-                (release.id,),
-            )
-            previous_key_sources = {}
-            for row in cursor.fetchall():
-                previous_key_sources.setdefault(row["position"], []).append(
-                    (row["source"], row["key"], row["strength"], row["detail"])
-                )
-
-            cursor.execute(
-                "DELETE FROM bpm_sources WHERE track_id IN"
-                " (SELECT id FROM tracks WHERE release_id = ?)",
-                (release.id,),
-            )
-            cursor.execute(
-                "DELETE FROM key_sources WHERE track_id IN"
-                " (SELECT id FROM tracks WHERE release_id = ?)",
-                (release.id,),
-            )
-            cursor.execute(
-                "DELETE FROM pending_downloads WHERE track_id IN"
-                " (SELECT id FROM tracks WHERE release_id = ?)",
-                (release.id,),
-            )
-            cursor.execute(
-                "DELETE FROM failed_downloads WHERE track_id IN"
-                " (SELECT id FROM tracks WHERE release_id = ?)",
-                (release.id,),
-            )
-            cursor.execute("DELETE FROM tracks WHERE release_id = ?", (release.id,))
-
-            for track in release.tracklist:
-                # Rows without position are section titles
-                # ("Side A", suite names, etc.), not songs.
-                if not track.position:
+            for sort_order, track in enumerate(incoming_tracks):
+                previous = previous_by_position.get(track["position"])
+                if previous is not None and same_track_identity(
+                    previous, track["title"], track["artist"]
+                ):
+                    duration = track["duration"] or previous["duration_display"] or ""
+                    cursor.execute(
+                        "UPDATE tracks SET position = ?, title = ?, artist = ?,"
+                        " duration_display = ?, sort_order = ? WHERE id = ?",
+                        (
+                            track["position"], track["title"], track["artist"],
+                            duration, sort_order, previous["id"],
+                        ),
+                    )
+                    retained_ids.add(previous["id"])
                     continue
-                previous = previous_tracks.get(track.position) or {}
-                # If Discogs doesn't have the duration but we already filled
-                # it from another source, we keep it.
-                duration = track.duration or previous.get("duration_display") or ""
 
-                # On "Various" records (compilations), Discogs stores the
-                # actual artist per track (track.artists) instead of at the
-                # record level. If the track has one, we save it separately;
-                # if not (single-artist record), it remains None and we use
-                # the record artist.
-                track_artist = (
-                    " / ".join(clean_artist(a.name) for a in track.artists)
-                    if track.artists
-                    else None
-                )
-                if track_artist == artist:
-                    track_artist = None
-
+                # A different song now occupies this position. Never inherit
+                # the old song's BPM, key, ISRC, or downloaded audio link.
+                if previous is not None:
+                    delete_track(cursor, previous["id"])
                 cursor.execute(
-                    """
-                    INSERT INTO tracks (release_id, position, title, artist, duration_display,
-                                        bpm, bpm_source, bpm_alt, bpm_needs_review, bpm_verified,
-                                        key, key_source, key_alt, key_needs_review, key_verified,
-                                        key_strength, isrc,
-                                        audio_path, audio_format, audio_source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+                    "INSERT INTO tracks"
+                    " (release_id, position, title, artist, duration_display, sort_order)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
                     (
-                        release.id, track.position, track.title, track_artist, duration,
-                        previous.get("bpm"), previous.get("bpm_source"), previous.get("bpm_alt"),
-                        previous.get("bpm_needs_review") or 0, previous.get("bpm_verified") or 0,
-                        previous.get("key"), previous.get("key_source"), previous.get("key_alt"),
-                        previous.get("key_needs_review") or 0, previous.get("key_verified") or 0,
-                        previous.get("key_strength"), previous.get("isrc"),
-                        previous.get("audio_path"), previous.get("audio_format"),
-                        previous.get("audio_source"),
+                        release.id, track["position"], track["title"],
+                        track["artist"], track["duration"], sort_order,
                     ),
                 )
-                new_track_id = cursor.lastrowid
-                for source, bpm, detail in previous_sources.get(track.position, []):
-                    cursor.execute(
-                        "INSERT OR IGNORE INTO bpm_sources (track_id, source, bpm, detail)"
-                        " VALUES (?, ?, ?, ?)",
-                        (new_track_id, source, bpm, detail),
-                    )
-                for source, key, strength, detail in previous_key_sources.get(track.position, []):
-                    cursor.execute(
-                        "INSERT OR IGNORE INTO key_sources"
-                        " (track_id, source, key, strength, detail) VALUES (?, ?, ?, ?, ?)",
-                        (new_track_id, source, key, strength, detail),
-                    )
+
+            # Positions removed from Discogs are genuinely gone. Explicitly
+            # clear child rows for databases created before cascading FKs.
+            for previous in old_tracks:
+                if previous["id"] not in retained_ids:
+                    delete_track(cursor, previous["id"])
 
             # A full Discogs refresh may have changed the track list. Make all
             # downstream steps pending for that release again. New releases
             # have no workflow rows yet, so they are already pending.
             if release.id in existing_ids:
+                cursor.execute(
+                    "DELETE FROM track_workflow_steps WHERE track_id IN "
+                    "(SELECT id FROM tracks WHERE release_id = ?)",
+                    (release.id,),
+                )
                 cursor.execute("DELETE FROM workflow_steps WHERE release_id = ?", (release.id,))
                 refreshed += 1
             else:
                 imported += 1
-            conn.commit()
+            cursor.execute("RELEASE SAVEPOINT release_refresh")
+            savepoint_open = False
 
         except Exception as e:
             # If an individual record fails (e.g., a temporary network issue),
             # we note it and continue with the rest instead of stopping
             # the whole process.
+            if savepoint_open:
+                cursor.execute("ROLLBACK TO SAVEPOINT release_refresh")
+                cursor.execute("RELEASE SAVEPOINT release_refresh")
+                savepoint_open = False
             errors.append((getattr(item, "id", "?"), str(e)))
             print(f"   -> Error with this record, continuing: {e}")
 
@@ -310,10 +326,21 @@ def main():
         if fetched_details:
             time.sleep(1.1)
 
-    # If the traversal completed without errors, we delete records that
-    # are no longer in your Discogs collection (you sold them, etc.).
-    # If there were errors, we don't delete anything just in case.
+    # A paginated API can theoretically end cleanly before yielding its stated
+    # count. Treat that as an operational failure: deleting based on a partial
+    # view of the collection could remove valid local records.
+    if traversed != total:
+        message = f"Discogs returned {traversed} of {total} collection items"
+        errors.append(("collection", message))
+        print(f"\n   -> {message}; no local records were removed.")
+
+    # Only a complete, error-free traversal is authoritative enough to remove
+    # records that are no longer in the Discogs collection.
     if not errors and collection_ids:
+        removed_ids = existing_ids - set(collection_ids)
+        if removed_ids and not refresh_all:
+            backup = database.backup_database()
+            print(f"\nSafety backup created before collection removals: {backup}")
         placeholders = ",".join("?" * len(collection_ids))
         cursor.execute(
             f"DELETE FROM bpm_sources WHERE track_id IN"
@@ -332,6 +359,11 @@ def main():
         )
         cursor.execute(
             f"DELETE FROM failed_downloads WHERE track_id IN"
+            f" (SELECT id FROM tracks WHERE release_id NOT IN ({placeholders}))",
+            collection_ids,
+        )
+        cursor.execute(
+            f"DELETE FROM track_workflow_steps WHERE track_id IN"
             f" (SELECT id FROM tracks WHERE release_id NOT IN ({placeholders}))",
             collection_ids,
         )
@@ -360,8 +392,9 @@ def main():
     )
     if errors:
         print(f"{len(errors)} records had errors (see above).")
-    print("Next step: python enrich_beatport.py  (BPM and tonality)")
+    print("Next step: python -m vinyl_labels beatport  (BPM and tonality)")
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

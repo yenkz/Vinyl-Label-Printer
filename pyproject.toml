@@ -1,0 +1,44 @@
+[project]
+name = "vinyl-label-printer"
+version = "1.0.0"
+description = "Discogs-backed vinyl label and digital-library workflow"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pillow==12.3.0",
+    "python-dotenv==1.2.2",
+    "python3-discogs-client==2.8",
+    "requests==2.34.2",
+]
+
+[project.optional-dependencies]
+audio = [
+    "deeprhythm==0.0.13",
+    "essentia==2.1b6.dev1389",
+    "imageio-ffmpeg==0.6.0",
+    "librosa==0.11.0",
+    "yt-dlp==2026.8.19",
+]
+printer = [
+    "brother-ql-inventree==1.3",
+    "pyusb==1.3.1",
+]
+soulseek = [
+    "mutagen==1.48.1",
+    "slskd-api==0.2.4",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

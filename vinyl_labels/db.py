@@ -23,12 +23,19 @@ Think of it as a mini spreadsheet with several "tabs":
   - workflow_steps: which automatic steps have already been attempted for
                  each record. This makes normal runs delta-only: records that
                  were already in the collection are not searched again.
+  - track_workflow_steps: per-track progress for limited analyzer batches, so
+                 clean misses do not prevent later tracks from being reached.
 """
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "vinyl_labels.db"
+from .paths import PROJECT_ROOT
+
+DB_PATH = PROJECT_ROOT / "vinyl_labels.db"
+BUSY_TIMEOUT_MS = 5_000
+SCHEMA_VERSION = 6
 
 # Steps that operate on a record after it has been imported. When the workflow
 # ledger is introduced to an existing database, all existing records are
@@ -38,23 +45,221 @@ WORKFLOW_STEPS = ("beatport", "bandcamp", "spotify", "analyze", "render")
 
 
 def get_connection():
-    """Opens (or creates if it doesn't exist) the database."""
-    conn = sqlite3.connect(DB_PATH)
+    """Open the database with the safety settings every caller relies on."""
+    conn = sqlite3.connect(DB_PATH, timeout=BUSY_TIMEOUT_MS / 1_000)
     conn.row_factory = sqlite3.Row  # allows accessing columns by name, e.g., row["title"]
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    # WAL lets the editor read while a background enrichment command writes.
+    # Some special SQLite databases/filesystems do not support it, so retain
+    # SQLite's current journal mode rather than making the connection unusable.
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
-def init_db():
+def backup_database(backup_dir=None):
+    """Create a consistent timestamped copy of the current database.
+
+    ``backup_dir`` defaults to a ``backups`` directory beside the database. The SQLite backup API
+    is used instead of copying the file so this remains safe when WAL is active.
+    Returns the path to the newly created backup.
     """
-    Creates the tables if they don't exist yet. It's safe to run this
-    as many times as you want: if they already exist, it does nothing.
-    """
-    conn = get_connection()
+    source_path = Path(DB_PATH)
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Database does not exist: {source_path}")
+
+    destination_dir = (
+        Path(backup_dir) if backup_dir is not None else source_path.parent / "backups"
+    )
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    suffix = source_path.suffix or ".db"
+    destination = destination_dir / f"{source_path.stem}.backup-{timestamp}{suffix}"
+
+    source = sqlite3.connect(source_path, timeout=BUSY_TIMEOUT_MS / 1_000)
+    target = sqlite3.connect(destination)
+    try:
+        source.backup(target)
+    except Exception:
+        target.close()
+        destination.unlink(missing_ok=True)
+        raise
+    else:
+        target.close()
+    finally:
+        source.close()
+    return destination
+
+
+def _add_safety_indexes(conn):
+    """Add non-destructive indexes, tolerating ambiguous legacy positions."""
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_release_id ON tracks(release_id)")
+    # Empty/NULL positions occur in some Discogs data and are not identifiers.
+    # Do not make an existing database unusable merely because it has duplicate
+    # meaningful positions; a later init will add the index once they are fixed.
+    duplicate_position = conn.execute(
+        "SELECT 1 FROM tracks"
+        " WHERE position IS NOT NULL AND TRIM(position) <> ''"
+        " GROUP BY release_id, position HAVING COUNT(*) > 1 LIMIT 1"
+    ).fetchone()
+    if duplicate_position is None:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_tracks_release_position"
+            " ON tracks(release_id, position)"
+            " WHERE position IS NOT NULL AND TRIM(position) <> ''"
+        )
+
+
+def _remove_orphans(conn):
+    """Remove unusable child rows left by historically disabled FK checks."""
+    for table in (
+        "bpm_sources",
+        "key_sources",
+        "pending_downloads",
+        "failed_downloads",
+        "track_workflow_steps",
+    ):
+        conn.execute(
+            f"DELETE FROM {table} WHERE NOT EXISTS ("
+            f" SELECT 1 FROM tracks WHERE tracks.id = {table}.track_id)"
+        )
+    conn.execute(
+        "DELETE FROM workflow_steps WHERE NOT EXISTS ("
+        " SELECT 1 FROM releases"
+        " WHERE releases.release_id = workflow_steps.release_id)"
+    )
+
+
+def _add_integrity_triggers(conn):
+    """Reject impossible BPM values without rebuilding legacy tables."""
+    trigger_statements = (
+        """
+        CREATE TRIGGER IF NOT EXISTS validate_tracks_bpm_insert
+        BEFORE INSERT ON tracks
+        WHEN (NEW.bpm IS NOT NULL AND (
+                  TYPEOF(NEW.bpm) NOT IN ('integer', 'real')
+                  OR NEW.bpm <= 0 OR NEW.bpm > 400
+              ))
+          OR (NEW.bpm_alt IS NOT NULL AND (
+                  TYPEOF(NEW.bpm_alt) NOT IN ('integer', 'real')
+                  OR NEW.bpm_alt <= 0 OR NEW.bpm_alt > 400
+              ))
+        BEGIN
+            SELECT RAISE(ABORT, 'BPM must be greater than 0 and at most 400');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS validate_tracks_bpm_update
+        BEFORE UPDATE OF bpm, bpm_alt ON tracks
+        WHEN (NEW.bpm IS NOT NULL AND (
+                  TYPEOF(NEW.bpm) NOT IN ('integer', 'real')
+                  OR NEW.bpm <= 0 OR NEW.bpm > 400
+              ))
+          OR (NEW.bpm_alt IS NOT NULL AND (
+                  TYPEOF(NEW.bpm_alt) NOT IN ('integer', 'real')
+                  OR NEW.bpm_alt <= 0 OR NEW.bpm_alt > 400
+              ))
+        BEGIN
+            SELECT RAISE(ABORT, 'BPM must be greater than 0 and at most 400');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS validate_bpm_source_insert
+        BEFORE INSERT ON bpm_sources
+        WHEN NEW.bpm IS NOT NULL AND (
+                 TYPEOF(NEW.bpm) NOT IN ('integer', 'real')
+                 OR NEW.bpm <= 0 OR NEW.bpm > 400
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'BPM must be greater than 0 and at most 400');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS validate_bpm_source_update
+        BEFORE UPDATE OF bpm ON bpm_sources
+        WHEN NEW.bpm IS NOT NULL AND (
+                 TYPEOF(NEW.bpm) NOT IN ('integer', 'real')
+                 OR NEW.bpm <= 0 OR NEW.bpm > 400
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'BPM must be greater than 0 and at most 400');
+        END
+        """,
+    )
+    for statement in trigger_statements:
+        conn.execute(statement)
+
+
+def _add_cascade_triggers(conn):
+    """Give legacy schemas the same delete behavior as the fresh schema."""
+    trigger_statements = (
+        """
+        CREATE TRIGGER IF NOT EXISTS cascade_track_children
+        AFTER DELETE ON tracks
+        BEGIN
+            DELETE FROM bpm_sources WHERE track_id = OLD.id;
+            DELETE FROM key_sources WHERE track_id = OLD.id;
+            DELETE FROM pending_downloads WHERE track_id = OLD.id;
+            DELETE FROM failed_downloads WHERE track_id = OLD.id;
+            DELETE FROM track_workflow_steps WHERE track_id = OLD.id;
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS cascade_release_children
+        AFTER DELETE ON releases
+        BEGIN
+            DELETE FROM bpm_sources WHERE track_id IN (
+                SELECT id FROM tracks WHERE release_id = OLD.release_id
+            );
+            DELETE FROM key_sources WHERE track_id IN (
+                SELECT id FROM tracks WHERE release_id = OLD.release_id
+            );
+            DELETE FROM pending_downloads WHERE track_id IN (
+                SELECT id FROM tracks WHERE release_id = OLD.release_id
+            );
+            DELETE FROM failed_downloads WHERE track_id IN (
+                SELECT id FROM tracks WHERE release_id = OLD.release_id
+            );
+            DELETE FROM track_workflow_steps WHERE track_id IN (
+                SELECT id FROM tracks WHERE release_id = OLD.release_id
+            );
+            DELETE FROM tracks WHERE release_id = OLD.release_id;
+            DELETE FROM workflow_steps WHERE release_id = OLD.release_id;
+        END
+        """,
+    )
+    for statement in trigger_statements:
+        conn.execute(statement)
+
+
+def _migrate_database(conn):
+    """Apply the complete schema inside the caller's transaction."""
     # If the sources table doesn't exist yet, after creating it we
     # populate it with what's already in tracks (see below).
     tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    previous_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if previous_version > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Database schema version {previous_version} is newer than this code "
+            f"supports ({SCHEMA_VERSION})"
+        )
+    # Back up established databases before applying any migration. Brand-new
+    # empty SQLite files do not need a backup.
+    if tables and previous_version < SCHEMA_VERSION:
+        backup_database()
     conn.executescript(
         """
+        BEGIN IMMEDIATE;
+
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version     INTEGER PRIMARY KEY,
+            name        TEXT NOT NULL,
+            applied_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS releases (
             release_id   INTEGER PRIMARY KEY,   -- Discogs record ID
             artist       TEXT,
@@ -88,7 +293,8 @@ def init_db():
             audio_path        TEXT,     -- local path to digital copy downloaded from Soulseek; NULL = not downloaded
             audio_format      TEXT,     -- "aiff", "flac", "wav", "mp3"
             audio_source      TEXT,     -- Soulseek user the file came from (provenance)
-            FOREIGN KEY (release_id) REFERENCES releases(release_id)
+            sort_order        INTEGER,  -- stable zero-based order within the release
+            FOREIGN KEY (release_id) REFERENCES releases(release_id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS bpm_sources (
@@ -97,7 +303,7 @@ def init_db():
             bpm       REAL,             -- NULL = source was consulted and didn't have the track
             detail    TEXT,             -- where it came from exactly (e.g., measured video title)
             PRIMARY KEY (track_id, source),
-            FOREIGN KEY (track_id) REFERENCES tracks(id)
+            FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS key_sources (
@@ -107,21 +313,21 @@ def init_db():
             strength  REAL,             -- detector-specific, not comparable across detectors
             detail    TEXT,             -- exact audio/search result used for the estimate
             PRIMARY KEY (track_id, source),
-            FOREIGN KEY (track_id) REFERENCES tracks(id)
+            FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS pending_downloads (
             track_id  INTEGER PRIMARY KEY,  -- one live transfer per track
             username  TEXT NOT NULL,        -- Soulseek user the file was requested from
             filename  TEXT NOT NULL,        -- remote path on their side
-            FOREIGN KEY (track_id) REFERENCES tracks(id)
+            FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS failed_downloads (
             track_id   INTEGER PRIMARY KEY,  -- track we couldn't find on Soulseek
             reason     TEXT,                 -- why (nothing found, every source failed...)
             failed_at  TEXT NOT NULL,        -- ISO timestamp; entries expire after a week
-            FOREIGN KEY (track_id) REFERENCES tracks(id)
+            FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS workflow_steps (
@@ -129,13 +335,30 @@ def init_db():
             step          TEXT NOT NULL,
             completed_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (release_id, step),
-            FOREIGN KEY (release_id) REFERENCES releases(release_id)
+            FOREIGN KEY (release_id) REFERENCES releases(release_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS track_workflow_steps (
+            track_id      INTEGER NOT NULL,
+            step          TEXT NOT NULL,
+            completed_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (track_id, step),
+            FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
         );
         """
     )
     # Migration: if the database existed before we added these
     # columns, we add them now.
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
+    for column, definition in (
+        ("position", "TEXT"),
+        ("title", "TEXT"),
+        ("duration_display", "TEXT"),
+        ("bpm", "REAL"),
+        ("bpm_source", "TEXT"),
+    ):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE tracks ADD COLUMN {column} {definition}")
     if "artist" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN artist TEXT")
     if "bpm_alt" not in columns:
@@ -171,6 +394,16 @@ def init_db():
         conn.execute("ALTER TABLE tracks ADD COLUMN audio_format TEXT")   # "aiff", "flac", "wav", "mp3"
     if "audio_source" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN audio_source TEXT")   # Soulseek user it came from
+    if "sort_order" not in columns:
+        conn.execute("ALTER TABLE tracks ADD COLUMN sort_order INTEGER")
+    # Preserve existing track IDs while assigning deterministic display order.
+    conn.execute(
+        "UPDATE tracks AS current SET sort_order = ("
+        " SELECT COUNT(*) - 1 FROM tracks AS preceding"
+        " WHERE preceding.release_id = current.release_id"
+        " AND preceding.id <= current.id"
+        ") WHERE sort_order IS NULL"
+    )
     columns_releases = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
     # Migration: the record-label column was renamed from "sello" to "label".
     if "sello" in columns_releases and "label" not in columns_releases:
@@ -213,8 +446,35 @@ def init_db():
     # Retire bookkeeping for the removed automatic fallback step. Saved BPM
     # values and their source history deliberately remain untouched.
     conn.execute("DELETE FROM workflow_steps WHERE step = 'bpm'")
-    conn.commit()
-    conn.close()
+    _remove_orphans(conn)
+    _add_safety_indexes(conn)
+    _add_integrity_triggers(conn)
+    _add_cascade_triggers(conn)
+    conn.executemany(
+        "INSERT OR IGNORE INTO schema_migrations (version, name) VALUES (?, ?)",
+        (
+            (1, "initial_schema"),
+            (2, "enrichment_and_workflow_columns"),
+            (3, "connection_safety_and_indexes"),
+            (4, "stable_track_sort_order"),
+            (5, "orphan_cleanup_and_bpm_guards"),
+            (6, "per_track_workflow_progress"),
+        ),
+    )
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def init_db():
+    """Create or atomically migrate the database, then always close it."""
+    conn = get_connection()
+    try:
+        _migrate_database(conn)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def record_bpm_source(conn, track_id, source, bpm, detail=None):
@@ -258,8 +518,17 @@ def mark_workflow_step(conn, release_id, step):
     )
 
 
+def mark_track_workflow_step(conn, track_id, step):
+    """Record a clean per-track attempt so limited batches can advance."""
+    conn.execute(
+        "INSERT INTO track_workflow_steps (track_id, step) VALUES (?, ?)"
+        " ON CONFLICT(track_id, step) DO UPDATE SET completed_at = CURRENT_TIMESTAMP",
+        (track_id, step),
+    )
+
+
 if __name__ == "__main__":
-    # This lets you run "python db.py" to check that
+    # This lets you run "python -m vinyl_labels.db" to check that
     # the database is created correctly, without doing anything else.
     init_db()
     print(f"Database ready at: {DB_PATH}")

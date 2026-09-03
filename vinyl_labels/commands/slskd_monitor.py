@@ -12,9 +12,9 @@ which this script reads straight from slskd's API.
 
 Two ways to use it
 ------------------
-    python slskd_monitor.py            # one-shot: print the state and exit
+    python -m vinyl_labels slskd-status            # one-shot
                                        #   (exit code 0 = logged in, 1 = not)
-    python slskd_monitor.py --watch    # keep watching: log every change, send a
+    python -m vinyl_labels slskd-status --watch    # keep watching
                                        #   macOS notification when it drops off
                                        #   Soulseek, and restart the container to
                                        #   reset the backoff if it stays stuck
@@ -39,8 +39,9 @@ import sys
 import time
 from datetime import datetime
 
-import config
 import slskd_api
+
+from vinyl_labels import config
 
 # Don't restart more often than this, so a genuinely-down Soulseek server (where
 # restarting won't help) can't turn into a container-restart loop.
@@ -189,15 +190,18 @@ def watch(c, interval, stuck_after, do_restart, container):
         time.sleep(interval)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Check whether slskd is logged in to Soulseek.")
+def main(arguments=None):
+    parser = argparse.ArgumentParser(
+        prog="python -m vinyl_labels slskd-status",
+        description="Check whether slskd is logged in to Soulseek.",
+    )
     parser.add_argument("--watch", action="store_true", help="keep watching instead of a one-shot check")
     parser.add_argument("--interval", type=int, default=30, help="seconds between checks (watch mode)")
     parser.add_argument("--stuck-after", type=int, default=180,
                         help="seconds off Soulseek before notifying/restarting (watch mode)")
     parser.add_argument("--no-restart", action="store_true", help="watch and notify only; never restart")
     parser.add_argument("--container", default="slskd", help="Docker container to restart")
-    args = parser.parse_args()
+    args = parser.parse_args(arguments)
 
     if not config.SLSKD_API_KEY:
         print("SLSKD_API_KEY is empty. Put slskd's API key in your .env file.")

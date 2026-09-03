@@ -14,29 +14,44 @@ exact durations and cover. Bandcamp doesn't publish BPM or tonality: that's what
 the other steps are for.
 
 How to run it:
-    python enrich_bandcamp.py          # newly imported records only
-    python enrich_bandcamp.py --all    # retry the whole collection
+    python -m vinyl_labels bandcamp          # newly imported records only
+    python -m vinyl_labels bandcamp --all    # retry the whole collection
 
 Normal runs skip records already attempted, including old misses. Use --all
 when you want to try incomplete records again.
 """
 
+import argparse
 import html
 import json
 import re
-import sys
 import time
-from pathlib import Path
 
 import requests
 
-from common import download_cover, format_duration, looks_similar
-from db import get_connection, init_db, mark_workflow_step
+from vinyl_labels.common import download_cover, format_duration, looks_similar
+from vinyl_labels.db import get_connection, init_db, mark_workflow_step
+from vinyl_labels.paths import PROJECT_ROOT
 
 # Public API (no key) used by bandcamp.com's search engine.
 BANDCAMP_SEARCH_API = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
 
 BROWSER = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+
+
+class BandcampError(RuntimeError):
+    """Bandcamp could not answer reliably; the operation should be retried."""
+
+
+def parse_arguments(arguments=None):
+    parser = argparse.ArgumentParser(
+        prog="python -m vinyl_labels bandcamp",
+        description="Fill missing covers and durations from Bandcamp."
+    )
+    parser.add_argument(
+        "--all", action="store_true", help="retry the whole collection"
+    )
+    return parser.parse_args(arguments)
 
 
 def search_album_bandcamp(artist, title):
@@ -58,10 +73,16 @@ def search_album_bandcamp(artist, title):
         )
         resp.raise_for_status()
         results = resp.json().get("auto", {}).get("results") or []
-    except (requests.RequestException, ValueError):
-        return None
+        if not isinstance(results, list):
+            raise TypeError("results is not a list")
+    except requests.RequestException as error:
+        raise BandcampError(f"Bandcamp search request failed: {error}") from error
+    except (ValueError, TypeError, AttributeError) as error:
+        raise BandcampError("Bandcamp returned an invalid search response") from error
 
     for r in results:
+        if not isinstance(r, dict):
+            raise BandcampError("Bandcamp returned an invalid album result")
         if r.get("type") != "a" or not r.get("item_url_path"):
             continue
         if not looks_similar(r.get("name", ""), title):
@@ -80,27 +101,29 @@ def read_album_page(url):
     the list of tracks with durations (from the data-tralbum JSON that
     Bandcamp embeds for its player) and the cover URL."""
     try:
-        page = requests.get(url, headers=BROWSER, timeout=20).text
-    except requests.RequestException:
-        return [], None
+        response = requests.get(url, headers=BROWSER, timeout=20)
+        response.raise_for_status()
+        page = response.text
+    except requests.RequestException as error:
+        raise BandcampError(f"Bandcamp album request failed: {error}") from error
 
     trackinfo = []
     data = re.search(r'data-tralbum="([^"]+)"', page)
     if data:
         try:
             trackinfo = json.loads(html.unescape(data.group(1))).get("trackinfo") or []
-        except ValueError:
-            pass
+            if not isinstance(trackinfo, list):
+                raise TypeError("trackinfo is not a list")
+        except (ValueError, TypeError, AttributeError) as error:
+            raise BandcampError("Bandcamp returned invalid album metadata") from error
 
     cover = re.search(r'<meta property="og:image" content="([^"]+)"', page)
     return trackinfo, cover.group(1) if cover else None
 
 
-def main():
-    process_all = "--all" in sys.argv[1:]
-    if any(arg != "--all" for arg in sys.argv[1:]):
-        print(__doc__)
-        return
+def main(arguments=None):
+    args = parse_arguments(arguments)
+    process_all = args.all
 
     init_db()
     conn = get_connection()
@@ -119,15 +142,19 @@ def main():
     if not releases:
         conn.close()
         print("Nothing new to check. Use --all to revisit the whole collection.")
-        return
+        return 0
 
     stats = {"covers": 0, "durations": 0, "no_bandcamp": 0}
+    provider_failed = False
     for i, release in enumerate(releases, start=1):
         rid = release["release_id"]
-        cursor.execute("SELECT * FROM tracks WHERE release_id = ? ORDER BY id", (rid,))
+        cursor.execute(
+            "SELECT * FROM tracks WHERE release_id = ? ORDER BY sort_order, id",
+            (rid,),
+        )
         tracks_db = cursor.fetchall()
 
-        missing_cover = not release["cover_path"] or not (Path(__file__).parent / release["cover_path"]).exists()
+        missing_cover = not release["cover_path"] or not (PROJECT_ROOT / release["cover_path"]).exists()
         missing_durations = any(not t["duration_display"] for t in tracks_db)
         if not missing_cover and not missing_durations:
             mark_workflow_step(conn, rid, "bandcamp")
@@ -136,12 +163,24 @@ def main():
 
         label = f"[{i}/{len(releases)}] {release['artist']} - {release['title']}"
         artist = release["artist"].split(" / ")[0]
-        album = search_album_bandcamp(artist, release["title"])
         updates = []
+        release_failed = False
+
+        try:
+            album = search_album_bandcamp(artist, release["title"])
+        except BandcampError as error:
+            provider_failed = True
+            print(f"{label}: {error} (will retry)")
+            continue
 
         if album:
             time.sleep(0.5)  # between search and page, no rush
-            trackinfo, cover_url = read_album_page(album["item_url_path"])
+            try:
+                trackinfo, cover_url = read_album_page(album["item_url_path"])
+            except BandcampError as error:
+                provider_failed = True
+                print(f"{label}: {error} (will retry)")
+                continue
 
             if missing_durations and trackinfo:
                 durations = 0
@@ -168,11 +207,16 @@ def main():
                     cursor.execute("UPDATE releases SET cover_path = ? WHERE release_id = ?", (path, rid))
                     stats["covers"] += 1
                     updates.append("cover")
+                else:
+                    provider_failed = True
+                    release_failed = True
+                    updates.append("cover download failed (will retry)")
         else:
             stats["no_bandcamp"] += 1
             updates.append("not on Bandcamp")
 
-        mark_workflow_step(conn, rid, "bandcamp")
+        if not release_failed:
+            mark_workflow_step(conn, rid, "bandcamp")
         conn.commit()
         print(f"{label}: {', '.join(updates) if updates else 'no updates'}")
         time.sleep(0.5)
@@ -183,9 +227,10 @@ def main():
     print(f"Covers downloaded: {stats['covers']} | durations completed: {stats['durations']}")
     if stats["no_bandcamp"]:
         print(f"Records not on Bandcamp: {stats['no_bandcamp']}.")
-    print("Next step: python enrich_spotify.py  (last backup, optional)")
-    print("        or: python analyze_bpm.py     (missing BPMs)")
+    print("Next step: python -m vinyl_labels spotify  (last backup, optional)")
+    print("        or: python -m vinyl_labels analyze  (missing BPMs)")
+    return 1 if provider_failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

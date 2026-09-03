@@ -12,19 +12,20 @@ error-diffusion monochrome artwork, and automatic cutting.
 After each USB job, you must confirm that the physical label printed and cut
 completely. Only then is it moved to labels_output/printed/, so next time only
 confirmed labels are skipped. If you want to reprint one, move it back to
-labels_output/ and run this again.
+labels_output/ and run this again (or force a fresh canonical copy with
+python -m vinyl_labels render FILTER --all).
 
 Batch mode sends every pending label without pausing between confirmations.
 After the run, enter how many labels completed in order; only those are marked
 as printed.
 
 How to run it:
-    python print_labels.py            # print all pending
-    python print_labels.py aphex      # only those containing "aphex"
-    python print_labels.py --test     # test mode: shows what would print and
+    python -m vinyl_labels print            # print all pending
+    python -m vinyl_labels print aphex      # filter pending labels
+    python -m vinyl_labels print --test     # test mode: shows what would print and
                                       # how long, without printer and without
                                       # wasting a label (can combine with filter)
-    python print_labels.py --batch    # print continuously; confirm once at end
+    python -m vinyl_labels print --batch    # print continuously; confirm once
 
 Before running it for the first time:
   - Connect the printer via USB, powered on with the 62mm continuous
@@ -34,20 +35,22 @@ Before running it for the first time:
     because it blocks USB printing.
 """
 
-import re
-import sys
+import argparse
 import time
 from pathlib import Path
 
-from PIL import Image
 from brother_ql import BrotherQLRaster
-from brother_ql.conversion import convert
 from brother_ql.backends.helpers import discover, get_printer, get_status, send
+from brother_ql.conversion import convert
+from PIL import Image
 
-import config
-from db import get_connection, init_db
+from vinyl_labels import config
+from vinyl_labels.db import get_connection, init_db
+from vinyl_labels.paths import project_path
 
-OUTPUT_DIR = Path(__file__).parent / config.OUTPUT_DIR
+from .render_labels import file_name, release_id_from_path, unique_artifact_path
+
+OUTPUT_DIR = project_path(config.OUTPUT_DIR)
 PRINTED_DIR = OUTPUT_DIR / "printed"
 
 # Settings copied from "Fantastic Man - The Axis of People.lbx". For the 62mm
@@ -63,10 +66,6 @@ EXPECTED_MEDIA_TYPE = "Continuous length tape"
 EXPECTED_MEDIA_CATEGORY = "DK"
 PRINT_LABEL = "62red"
 PRINT_ROLL = "DK-2251 black/red on white"
-
-# Rendered filenames end with the Discogs release ID in parentheses.
-RELEASE_ID = re.compile(r"\((\d+)\)\.png$")
-
 
 def estimated_length_mm(img):
     """Physical roll length after the template's rotation and width fitting."""
@@ -102,17 +101,35 @@ def prepare_for_print(img):
 
 
 def validated_images(paths):
-    """Splits label paths into (printable, blocked) using edit_bpm's flags."""
+    """Splits paths into (printable, blocked), rejecting stale/duplicate IDs."""
     init_db()
     conn = get_connection()
     printable = []
     blocked = []
+    by_release = {}
     for path in paths:
-        match = RELEASE_ID.search(path.name)
-        if not match:
+        release_id = release_id_from_path(path)
+        if release_id is None:
             blocked.append(path)
             continue
-        release_id = int(match.group(1))
+        by_release.setdefault(release_id, []).append(path)
+
+    for release_id, release_paths in by_release.items():
+        # Never guess which copy to print. A normal render archives superseded
+        # names; if copies remain, stopping both is safer than printing twice.
+        if len(release_paths) != 1:
+            blocked.extend(release_paths)
+            continue
+
+        path = release_paths[0]
+        release = conn.execute(
+            "SELECT * FROM releases WHERE release_id = ?", (release_id,)
+        ).fetchone()
+        # A corrected artist/title creates a new canonical filename. Block the
+        # older pending artifact even if its tracks are still fully validated.
+        if release is None or path.name != file_name(release):
+            blocked.append(path)
+            continue
         row = conn.execute(
             "SELECT COUNT(*) AS total,"
             "       SUM(CASE WHEN bpm IS NOT NULL AND bpm_verified = 1 THEN 1 ELSE 0 END) AS valid"
@@ -127,8 +144,17 @@ def validated_images(paths):
     return printable, blocked
 
 
+def move_to_printed(path, printed_dir=PRINTED_DIR):
+    """Moves a confirmed label without overwriting earlier print history."""
+    printed_dir = Path(printed_dir)
+    printed_dir.mkdir(exist_ok=True)
+    destination = unique_artifact_path(printed_dir, Path(path).name)
+    Path(path).rename(destination)
+    return destination
+
+
 def find_printer():
-    """Returns the printer identifier: the one from config.py if defined,
+    """Returns the printer identifier: the configured one if defined,
     or the first Brother device found via USB."""
     if config.PRINTER_IDENTIFIER:
         return config.PRINTER_IDENTIFIER
@@ -144,7 +170,7 @@ def find_printer():
             "\nNo printer found connected.\n"
             "Check that it's plugged in and powered on. If it still doesn't appear,\n"
             "run in the terminal:  brother_ql discover\n"
-            "and paste the identifier in config.py (PRINTER_IDENTIFIER)."
+            "and paste the identifier in vinyl_labels/config.py (PRINTER_IDENTIFIER)."
         )
         return None
 
@@ -257,7 +283,7 @@ def confirm_batch(sent_paths):
         print(f"Please enter a number from 0 to {total}, or 'all'.")
 
     for path in sent_paths[:completed]:
-        path.rename(PRINTED_DIR / path.name)
+        move_to_printed(path)
 
     if completed:
         print(f"Marked the first {completed} label(s) as printed.")
@@ -266,32 +292,45 @@ def confirm_batch(sent_paths):
     return completed
 
 
-def main():
-    args = sys.argv[1:]
-    test_mode = "--test" in args
-    batch_mode = "--batch" in args
-    filter_str = next((a.lower() for a in args if not a.startswith("--")), "")
+def parse_arguments(arguments=None):
+    parser = argparse.ArgumentParser(
+        prog="python -m vinyl_labels print",
+        description="Print pending validated labels.",
+    )
+    parser.add_argument("filter", nargs="?", help="filename text to match")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--test", action="store_true", help="convert and estimate without printing")
+    mode.add_argument("--batch", action="store_true", help="send continuously, confirm once")
+    return parser.parse_args(arguments)
+
+
+def main(arguments=None):
+    args = parse_arguments(arguments)
+    test_mode = args.test
+    batch_mode = args.batch
+    filter_str = (args.filter or "").lower()
 
     pending = sorted(p for p in OUTPUT_DIR.glob("*.png") if filter_str in p.name.lower())
     images, blocked = validated_images(pending)
 
     if blocked:
         print(
-            f"Skipping {len(blocked)} pending label(s) that are not 100% "
-            "BPM-validated in `make edit`."
+            f"Skipping {len(blocked)} unsafe pending label(s): each label must "
+            "have a current release filename, a unique release ID, and 100% "
+            "BPM validation. Run `make render` after any metadata change."
         )
 
     if not images:
         if blocked:
-            print("No fully validated pending labels are ready to print.")
+            print("No current, uniquely identified, fully validated labels are ready to print.")
         elif filter_str:
             print(f"No pending labels containing '{filter_str}'.")
         else:
             print(f"No pending labels in {OUTPUT_DIR}/.")
-        print("Already printed ones are in labels_output/printed/ (move them")
-        print("back to labels_output/ if you want to reprint them), and to")
-        print("generate new ones run: python render_labels.py")
-        return
+        print("Already printed ones are in labels_output/printed/. To reprint,")
+        print("run python -m vinyl_labels render FILTER --all (or move it back);")
+        print("to generate new ones normally run: python -m vinyl_labels render")
+        return 0
 
     if test_mode:
         print(f"TEST MODE: {len(images)} pending labels. Nothing prints.\n")
@@ -300,9 +339,9 @@ def main():
 
         printer_identifier = find_printer()
         if printer_identifier is None:
-            return
+            return 1
         if not show_preflight(printer_identifier):
-            return
+            return 1
 
         if batch_mode:
             prompt = (
@@ -314,20 +353,22 @@ def main():
         response = input(prompt).strip().lower()
         if response != "y":
             print("Cancelled. Nothing printed.")
-            return
+            return 0
 
         PRINTED_DIR.mkdir(exist_ok=True)
 
     printed = 0
+    operational_failed = False
     sent_paths = []
     total_length_mm = 0
     for i, path in enumerate(images, start=1):
         try:
-            img = Image.open(path)
-            # Estimate after applying the same 270-degree rotation, width fit,
-            # and feed margin used for the real print below.
-            length_mm = estimated_length_mm(img)
-            print_img = prepare_for_print(img)
+            with Image.open(path) as img:
+                img.load()
+                # Estimate after applying the same 270-degree rotation, width
+                # fit, and feed margin used for the real print below.
+                length_mm = estimated_length_mm(img)
+                print_img = prepare_for_print(img)
             total_length_mm += length_mm
 
             if test_mode:
@@ -387,6 +428,7 @@ def main():
             if post_send_status:
                 problems = printer_preflight_problems(post_send_status)
                 if problems:
+                    operational_failed = True
                     print("   -> The printer rejected the job:")
                     for problem in problems:
                         print(f"      - {problem}")
@@ -421,6 +463,7 @@ def main():
             )
             break
         except Exception as e:
+            operational_failed = True
             print(f"   -> Error with this label: {e}")
             if not test_mode:
                 print("   Stopping before another job is sent to the printer.")
@@ -430,7 +473,7 @@ def main():
         if batch_mode:
             continue
         elif confirmation == "y":
-            path.rename(PRINTED_DIR / path.name)
+            move_to_printed(path)
             printed += 1
             print("   Confirmed; moved to labels_output/printed/.")
         elif confirmation == "n":
@@ -441,7 +484,7 @@ def main():
 
     if test_mode:
         print(f"\nIn total about {total_length_mm / 10:.0f}cm of roll would be used.")
-        print("To actually print: python print_labels.py")
+        print("To actually print: python -m vinyl_labels print")
     else:
         if batch_mode:
             try:
@@ -454,7 +497,8 @@ def main():
         print(f"\nDone. {printed} of {len(images)} labels confirmed printed.")
         if printed < len(images):
             print("Failed or unconfirmed labels stayed in labels_output/ to retry.")
+    return int(operational_failed)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

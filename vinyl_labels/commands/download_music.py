@@ -37,12 +37,12 @@ is kept as-is — no conversion (rekordbox/Serato read all four).
 
 How to run it
 -------------
-    python download_music.py                # everything still missing
-    python download_music.py aphex          # only records containing "aphex"
-    python download_music.py --force        # re-download even if already present
-    python download_music.py --retry-failed # also retry tracks that recently failed
-    python download_music.py --deep         # also try a title-only search (slower)
-    python download_music.py --parallel 12  # search 12 records at once (default 8)
+    python -m vinyl_labels download                # everything still missing
+    python -m vinyl_labels download aphex          # filter by record
+    python -m vinyl_labels download --force        # re-download existing
+    python -m vinyl_labels download --retry-failed # retry recent failures
+    python -m vinyl_labels download --deep         # wider search
+    python -m vinyl_labels download --parallel 12  # concurrent records
 
 Tracks that come up empty are remembered for a week and skipped on later runs,
 so a repeat run is quick and only chases what might actually have appeared since.
@@ -57,9 +57,7 @@ transfers keep downloading inside slskd, and the next run collects them.
 Records already fully downloaded are skipped without touching the network.
 """
 
-import re
-import shutil
-import sys
+import argparse
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -67,9 +65,28 @@ from pathlib import Path
 
 import slskd_api
 
-import config
-from common import ascii_fold, normalize, parse_duration, looks_similar
-from db import get_connection, init_db
+from vinyl_labels import config
+from vinyl_labels import soulseek as soulseek_helpers
+from vinyl_labels.common import parse_duration
+from vinyl_labels.db import get_connection, init_db
+
+# Compatibility aliases for callers that imported these helpers from the old
+# monolithic command. New code should import them from vinyl_labels.soulseek.
+LEADING_INDEX = soulseek_helpers.LEADING_INDEX
+artist_names = soulseek_helpers.artist_names
+candidate_score = soulseek_helpers.candidate_score
+clean_query = soulseek_helpers.clean_query
+cover_bytes = soulseek_helpers.cover_bytes
+format_rank = soulseek_helpers.format_rank
+library_path = soulseek_helpers.library_path
+locate_download = soulseek_helpers.locate_download
+mentions = soulseek_helpers.mentions
+place_and_tag = soulseek_helpers.place_and_tag
+rank_candidates = soulseek_helpers.rank_candidates
+remote_basename = soulseek_helpers.remote_basename
+safe_name = soulseek_helpers.safe_name
+tag_file = soulseek_helpers.tag_file
+track_stem = soulseek_helpers.track_stem
 
 # Set when you press Ctrl+C: every wait loop checks it, so all the worker
 # threads wind down within a few seconds instead of finishing their record.
@@ -81,50 +98,6 @@ STOP = threading.Event()
 # number of searches, so it's opt-in. (A track with no credited artist always
 # falls back to title-only regardless, or it could never be found at all.)
 DEEP_SEARCH = False
-
-# Audio we accept, and how strongly we prefer each one (higher = better),
-# following your order AIFF > FLAC > WAV > MP3 320 > lower-bitrate MP3.
-def format_rank(f):
-    """Preference score for a Soulseek file; -1 means 'not audio we want'."""
-    ext = (f.get("extension") or "").lower().lstrip(".")
-    if not ext:  # slskd sometimes leaves 'extension' empty; read it off the name
-        base = remote_basename(f.get("filename", ""))
-        ext = base.rsplit(".", 1)[-1].lower() if "." in base else ""
-    if ext in ("aiff", "aif"):
-        return 5
-    if ext == "flac":
-        return 4
-    if ext == "wav":
-        return 3
-    if ext == "mp3":
-        return 2 if (f.get("bitRate") or 0) >= 320 else 1
-    return -1
-
-
-# Soulseek paths use Windows-style backslashes ("@@abc\Music\Album\01 Track.flac"),
-# so we normalize before splitting off the file name.
-def remote_basename(remote_path):
-    return remote_path.replace("\\", "/").rsplit("/", 1)[-1]
-
-
-# A leading track number or vinyl position on a shared file ("A1 ", "01 - ",
-# "1.") says nothing about WHICH song it is, so we drop it before comparing
-# the file name to your track title.
-LEADING_INDEX = re.compile(r"^\s*([A-F]?\d{1,2}|[A-F])[\s._)\-]+", re.IGNORECASE)
-
-
-def track_stem(remote_path):
-    """File name with no folder, extension, or leading index — ready to compare."""
-    base = remote_basename(remote_path)
-    stem = base.rsplit(".", 1)[0] if "." in base else base
-    return LEADING_INDEX.sub("", stem).strip()
-
-
-def safe_name(text):
-    """A version of a name safe to use as a file or folder on disk."""
-    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", text or "")
-    return text.strip().strip(".") or "Unknown"
-
 
 # =========================================================
 # Talking to slskd (search + queueing downloads)
@@ -220,36 +193,6 @@ def enqueue(client, username, files):
 # =========================================================
 # Matching Soulseek results to your tracks
 # =========================================================
-def clean_query(text):
-    """A Soulseek-friendly version of a name: accents folded to plain ASCII
-    and punctuation turned into spaces. Peers must match every word of the
-    query against their file paths, so "Étienne" or "Rock'n'Roll" find far
-    fewer copies than "Etienne" or "Rock n Roll"."""
-    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", ascii_fold(text or ""))).strip()
-
-
-def artist_names(*credits):
-    """Every individual artist in composite Discogs credits ("B.Love / Jhobei"
-    -> ["B.Love", "Jhobei"]), skipping Various/unknown placeholders."""
-    names = []
-    for credit in credits:
-        for name in (credit or "").split(" / "):
-            name = name.strip()
-            if name and not name.lower().startswith(("various", "unknown")) and name not in names:
-                names.append(name)
-    return names
-
-
-def mentions(remote_path, artists):
-    """True if the shared file's full path names ANY of the given artists.
-    Used when a search didn't include the artist (title-only fallback): a
-    track called the same thing by someone else would otherwise slip through.
-    On split records any credited artist counts — files are often named after
-    the track's own artist, not the first one on the record sleeve."""
-    path = normalize(remote_path)
-    return any(normalize(a) in path for a in artists)
-
-
 def track_candidates(client, release, track, limit=3):
     """Per-track fallback: search '<artist> <title>' and return
     (candidates, saw_unconfirmed) — candidates as up to `limit`
@@ -283,144 +226,21 @@ def track_candidates(client, release, track, limit=3):
 
     best_per_user = {}  # username -> (key, file)
     for query, need_artist in queries:
-        for r in run_search(client, query):
-            for f in r.get("files", []):
-                if f.get("isLocked") or format_rank(f) < 0:
-                    continue
-                if not looks_similar(track_stem(f["filename"]), track["title"]):
-                    continue
-                if need_artist and not mentions(f["filename"], credited):
-                    unconfirmed = True
-                    continue
-                duration_penalty = abs((f.get("length") or 0) - target) if target else 0
-                key = (
-                    format_rank(f),
-                    int(r.get("hasFreeUploadSlot", False)),
-                    -duration_penalty,
-                    r.get("uploadSpeed", 0),
-                    -r.get("queueLength", 0),
-                )
-                user = r["username"]
-                if user not in best_per_user or key > best_per_user[user][0]:
-                    best_per_user[user] = (key, f)
+        ranked_query, saw_unconfirmed = rank_candidates(
+            run_search(client, query),
+            track["title"],
+            credited,
+            target,
+            need_artist,
+        )
+        unconfirmed = unconfirmed or saw_unconfirmed
+        for file_info, username, score in ranked_query:
+            if username not in best_per_user or score > best_per_user[username][0]:
+                best_per_user[username] = (score, file_info)
         if best_per_user:
             break  # good enough from the more specific query; don't widen
     ranked = sorted(best_per_user.items(), key=lambda item: item[1][0], reverse=True)
     return [(f, user) for user, (_, f) in ranked[:limit]], unconfirmed
-
-
-# =========================================================
-# Putting files in place, with tags and cover
-# =========================================================
-def cover_bytes(release):
-    """The record cover downloaded by the label steps, as bytes (or None)."""
-    if not release["cover_path"]:
-        return None
-    path = Path(__file__).parent / release["cover_path"]
-    return path.read_bytes() if path.exists() else None
-
-
-def tag_file(path, track, release):
-    """Writes title/artist/album/track/year/label and embeds the cover.
-    FLAC uses Vorbis comments; MP3/AIFF/WAV use ID3."""
-    ext = path.suffix.lower().lstrip(".")
-    cover = cover_bytes(release)
-    artist = track["artist"] or release["artist"] or ""
-
-    if ext == "flac":
-        from mutagen.flac import FLAC, Picture
-
-        audio = FLAC(str(path))
-        audio["title"] = track["title"] or ""
-        audio["artist"] = artist
-        audio["album"] = release["title"] or ""
-        audio["albumartist"] = release["artist"] or ""
-        if track["position"]:
-            audio["tracknumber"] = str(track["position"])
-        if release["year"]:
-            audio["date"] = str(release["year"])
-        if release["label"]:
-            audio["organization"] = release["label"]
-        if release["catno"]:
-            audio["catalognumber"] = release["catno"]
-        if cover:
-            picture = Picture()
-            picture.type = 3  # front cover
-            picture.mime = "image/jpeg"
-            picture.data = cover
-            audio.clear_pictures()
-            audio.add_picture(picture)
-        audio.save()
-        return
-
-    # MP3 / AIFF / WAV — all tagged with ID3, via the right container class.
-    from mutagen.id3 import APIC, TALB, TDRC, TIT2, TPE1, TPE2, TPUB, TRCK
-
-    if ext in ("aiff", "aif"):
-        from mutagen.aiff import AIFF as Container
-    elif ext == "wav":
-        from mutagen.wave import WAVE as Container
-    else:
-        from mutagen.mp3 import MP3 as Container
-
-    audio = Container(str(path))
-    if audio.tags is None:
-        audio.add_tags()
-    tags = audio.tags
-    tags.setall("TIT2", [TIT2(encoding=3, text=track["title"] or "")])
-    tags.setall("TPE1", [TPE1(encoding=3, text=artist)])
-    tags.setall("TALB", [TALB(encoding=3, text=release["title"] or "")])
-    tags.setall("TPE2", [TPE2(encoding=3, text=release["artist"] or "")])
-    if track["position"]:
-        tags.setall("TRCK", [TRCK(encoding=3, text=str(track["position"]))])
-    if release["year"]:
-        tags.setall("TDRC", [TDRC(encoding=3, text=str(release["year"]))])
-    if release["label"]:
-        tags.setall("TPUB", [TPUB(encoding=3, text=release["label"])])
-    if cover:
-        tags.setall("APIC", [APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover)])
-    audio.save()
-
-
-def locate_download(f, track):
-    """Finds the finished file on disk in slskd's downloads folder. Tries the
-    exact name first; if slskd renamed it, falls back to the same extension plus
-    a fuzzy title match."""
-    root = Path(config.SLSKD_DOWNLOADS_DIR).expanduser()
-    if not root.exists():
-        return None
-    base = remote_basename(f["filename"])
-    exact = [p for p in root.rglob(base) if p.is_file()]
-    if exact:
-        return max(exact, key=lambda p: p.stat().st_mtime)
-    ext = (f.get("extension") or (base.rsplit(".", 1)[-1] if "." in base else "")).lower().lstrip(".")
-    if not ext:
-        return None
-    fuzzy = [
-        p for p in root.rglob(f"*.{ext}")
-        if p.is_file() and looks_similar(LEADING_INDEX.sub("", p.stem).strip(), track["title"])
-    ]
-    return max(fuzzy, key=lambda p: p.stat().st_mtime) if fuzzy else None
-
-
-def place_and_tag(src, track, release):
-    """Moves the downloaded file into the library, names it by vinyl position,
-    tags it, and returns its final path."""
-    ext = src.suffix.lower()
-    folder = f"{release['artist']} - {release['title']}"
-    if release["catno"]:
-        folder += f" ({release['catno']})"
-    dest_dir = Path(config.MUSIC_DIR).expanduser() / safe_name(folder)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    prefix = f"{track['position']} " if track["position"] else ""
-    dest = dest_dir / f"{safe_name(prefix + (track['title'] or 'Untitled'))}{ext}"
-    shutil.move(str(src), str(dest))
-    try:
-        tag_file(dest, track, release)
-    except Exception as e:  # a tagging hiccup shouldn't lose the download
-        print(f"      (couldn't write tags: {e})")
-    return dest
 
 
 # =========================================================
@@ -877,22 +697,25 @@ def connect():
     return client
 
 
-def main():
+def main(arguments=None):
     global DEEP_SEARCH
-    arguments = sys.argv[1:]
-    force = "--force" in arguments
-    retry_failed = "--retry-failed" in arguments
-    DEEP_SEARCH = "--deep" in arguments
-    parallel = 8  # how many records to search at the same time
-    if "--parallel" in arguments:
-        at = arguments.index("--parallel")
-        try:
-            parallel = max(1, int(arguments[at + 1]))
-        except (IndexError, ValueError):
-            print("--parallel needs a number, e.g.: python download_music.py --parallel 12")
-            return
-        del arguments[at:at + 2]
-    filter_text = next((a.lower() for a in arguments if not a.startswith("--")), "")
+    parser = argparse.ArgumentParser(
+        prog="python -m vinyl_labels download",
+        description="Download digital copies of owned records through slskd."
+    )
+    parser.add_argument("filter", nargs="?", help="artist/record text to match")
+    parser.add_argument("--force", action="store_true", help="download existing tracks again")
+    parser.add_argument("--retry-failed", action="store_true", help="retry recent misses")
+    parser.add_argument("--deep", action="store_true", help="also run title-only searches")
+    parser.add_argument("--parallel", type=int, default=8, metavar="N")
+    args = parser.parse_args(arguments)
+    if args.parallel < 1:
+        parser.error("--parallel must be a positive integer")
+    force = args.force
+    retry_failed = args.retry_failed
+    DEEP_SEARCH = args.deep
+    parallel = args.parallel
+    filter_text = (args.filter or "").lower()
 
     init_db()
     conn = get_connection()
@@ -901,18 +724,21 @@ def main():
     cursor.execute("SELECT * FROM releases ORDER BY artist, title")
     releases = cursor.fetchall()
     if not releases:
-        print("Your collection is empty. Run first: python fetch_discogs.py")
-        return
+        print("Your collection is empty. Run first: python -m vinyl_labels fetch")
+        conn.close()
+        return 1
 
     if filter_text:
         releases = [r for r in releases if filter_text in f"{r['artist']} {r['title']}".lower()]
         if not releases:
             print(f"No record in your collection contains '{filter_text}'.")
-            return
+            conn.close()
+            return 1
 
     client = connect()
     if client is None:
-        return
+        conn.close()
+        return 2
 
     # Whatever a previous run left queued has kept downloading inside slskd:
     # collect the finished files and put the live transfers back on the board.
@@ -931,7 +757,7 @@ def main():
     todo = []
     for i, release in enumerate(releases, start=1):
         cursor.execute(
-            "SELECT * FROM tracks WHERE release_id = ? ORDER BY id",
+            "SELECT * FROM tracks WHERE release_id = ? ORDER BY sort_order, id",
             (release["release_id"],),
         )
         tracks = cursor.fetchall()
@@ -960,7 +786,7 @@ def main():
                 for t in tracks:
                     board.pending.pop(t["id"], None)
             tracks = cursor.execute(
-                "SELECT * FROM tracks WHERE release_id = ? ORDER BY id",
+                "SELECT * FROM tracks WHERE release_id = ? ORDER BY sort_order, id",
                 (release["release_id"],),
             ).fetchall()
         elif all(has_audio(t) for t in tracks):
@@ -1039,7 +865,8 @@ def main():
               "(try them by hand on Soulseek, or buy them on Bandcamp):")
         for line in not_found:
             print(f"  - {line}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -34,7 +34,7 @@ anything.
 Tempo is measured with TWO different detectors (deeprhythm, a neural network
 trained on electronic music, and librosa, the classic). If both agree, the
 number is reliable — but NOTHING validates itself: you put the green checkmark
-in the editor (python edit_bpm.py), seeing all sources. If they don't agree —
+in the editor (python -m vinyl_labels edit), seeing all sources. If they don't agree —
 typical error of "one detector heard 89 where the other heard 134" — deeprhythm's
 is saved anyway, but the track is marked as doubtful, with the other candidate
 one click away in the editor.
@@ -48,20 +48,19 @@ the 60-second middle excerpt remains specific to BPM.
 
 Since tempo detectors sometimes return double or half, the result is adjusted
 to the typical club music range (88–176). If your collection is different
-(hip hop, ambient...), adjust BPM_MIN / BPM_MAX in common.py.
+(hip hop, ambient...), adjust BPM_MIN / BPM_MAX in vinyl_labels/common.py.
 
 How to run it:
-    python analyze_bpm.py        # missing BPMs/keys on newly imported records
-    python analyze_bpm.py 5      # only 5 (for testing)
-    python analyze_bpm.py --all  # retry old missing BPMs/keys too
-    python analyze_bpm.py 20 --pace 8  # wait 8s between tracks in this batch
+    python -m vinyl_labels analyze        # newly imported records
+    python -m vinyl_labels analyze 5      # only 5 (for testing)
+    python -m vinyl_labels analyze --all  # retry old missing BPMs/keys too
+    python -m vinyl_labels analyze 20 --pace 8
 
 You can stop with Ctrl+C anytime: what's already analyzed is saved,
 and next time it continues from where it left off.
 """
 
 import argparse
-import difflib
 import math
 import subprocess
 import tempfile
@@ -75,24 +74,37 @@ import numpy as np
 import requests
 from yt_dlp import YoutubeDL
 
-import config
-from common import fit_to_range, format_duration, normalize_key, parse_duration
-from db import (
+from vinyl_labels import audio_matching as _audio_matching
+from vinyl_labels import config
+from vinyl_labels.common import fit_to_range, format_duration, normalize_key, parse_duration
+from vinyl_labels.db import (
     get_connection,
     init_db,
+    mark_track_workflow_step,
     mark_workflow_step,
     record_bpm_source,
     record_key_source,
 )
 
+# Compatibility exports: these names historically lived in this command module.
+COMPILATION_WORDS = _audio_matching.COMPILATION_WORDS
+EMPTY_WORDS = _audio_matching.EMPTY_WORDS
+FUZZY_THRESHOLD = _audio_matching.FUZZY_THRESHOLD
+TOLERANCE_PERCENTAGE = _audio_matching.TOLERANCE_PERCENTAGE
+TOLERANCE_SECONDS = _audio_matching.TOLERANCE_SECONDS
+artist_tokens = _audio_matching.artist_tokens
+build_queries = _audio_matching.build_queries
+compact = _audio_matching.compact
+partial_similarity = _audio_matching.partial_similarity
+seems_compilation = _audio_matching.seems_compilation
+select_videos = _audio_matching.select_videos
+split_artists = _audio_matching.split_artists
+title_matches = _audio_matching.title_matches
+words = _audio_matching.words
+
 # If the two detectors differ by more than this (already adjusted to
 # common.py range), the track is marked for manual review.
 TOLERANCE_BPM = 2.5
-
-# How much the video duration can differ from Discogs for it to be
-# considered the correct track: 20 seconds or 12%, whichever is larger.
-TOLERANCE_SECONDS = 20
-TOLERANCE_PERCENTAGE = 0.12
 
 # Delay between tracks. It can be overridden for one run with --pace.
 DEFAULT_PACE_SECONDS = 3.0
@@ -109,6 +121,11 @@ SEARCHERS = [
     ("YouTube", "ytsearch6"),
     ("SoundCloud", "scsearch6"),
 ]
+
+# Persisted in source details so future audit versions can distinguish this
+# analysis generation without requiring a database migration.
+LOCAL_ANALYSIS_VERSION = "local-audio-v1"
+LOCAL_AUDIO_SOURCES = ("bandcamp", "youtube", "soundcloud")
 
 
 @dataclass
@@ -128,6 +145,59 @@ class AudioAnalysis:
     key_doubtful: bool = False
     key_strength: float | None = None
     key_estimates: list[KeySourceEstimate] = field(default_factory=list)
+
+
+class AudioProviderError(RuntimeError):
+    """A search provider failed before it could give a reliable empty result."""
+
+
+@dataclass(frozen=True)
+class AudioSource:
+    """The exact search result used for local audio analysis.
+
+    ``platform`` is the stable, lowercase value stored in ``bpm_source`` and
+    ``bpm_sources.source``. Keeping the rest structured until persistence
+    prevents a Bandcamp or SoundCloud result from being mislabeled as YouTube.
+    """
+
+    platform: str | None = None
+    title: str = ""
+    url: str | None = None
+    note: str | None = None
+    analysis_version: str | None = LOCAL_ANALYSIS_VERSION
+    retryable: bool = False
+
+    @property
+    def detail(self):
+        if self.platform is None:
+            return self.note or ""
+
+        metadata = [self.platform_display]
+        if self.analysis_version:
+            metadata.append(f"analysis={self.analysis_version}")
+        if self.url:
+            metadata.append(f"url={self.url}")
+        if self.note:
+            metadata.append(self.note)
+        return f"{self.title} [{'; '.join(metadata)}]"
+
+    @property
+    def platform_display(self):
+        return {
+            "bandcamp": "Bandcamp",
+            "youtube": "YouTube",
+            "soundcloud": "SoundCloud",
+        }.get(self.platform, (self.platform or "").title())
+
+
+def audio_source(searcher_name, video, *, note=None):
+    """Builds normalized provenance from one selected search result."""
+    return AudioSource(
+        platform=searcher_name.lower(),
+        title=video.get("title", ""),
+        url=video.get("url"),
+        note=note,
+    )
 
 
 def base_options():
@@ -164,6 +234,7 @@ def non_negative_seconds(value):
 
 def parse_arguments(arguments=None):
     parser = argparse.ArgumentParser(
+        prog="python -m vinyl_labels analyze",
         description="Measure missing BPMs and musical keys from downloaded audio."
     )
     parser.add_argument("limit", nargs="?", type=int, help="maximum tracks to analyze")
@@ -186,153 +257,6 @@ def parse_arguments(arguments=None):
     return args
 
 
-# Words that don't say anything about WHICH track it is (appear in any
-# title) and so don't count for comparison.
-EMPTY_WORDS = {"the", "and", "you", "your", "feat", "with", "mix", "original"}
-
-
-def words(text):
-    """Converts a title to a set of comparable words."""
-    clean = "".join(c.lower() if c.isalnum() else " " for c in text)
-    return {p for p in clean.split() if len(p) > 2 and p not in EMPTY_WORDS}
-
-
-def split_artists(artist):
-    """Returns the list of artists from a composite Discogs credit
-    ("B.Love / Jhobei" -> ["B.Love", "Jhobei"]). In a split or
-    collaboration the track may be published under any of the names,
-    so each must be searched and a video from either counts as good.
-    For "Various" or "Unknown" returns empty list (no artist to check)."""
-    if artist.lower() in ("various", "unknown"):
-        return []
-    return [part.strip() for part in artist.split(" / ") if part.strip()]
-
-
-def artist_tokens(artist):
-    """Comparable words from ALL artists in the credit, for checking
-    'does the artist appear in the video?'."""
-    tokens = set()
-    for part in split_artists(artist):
-        tokens |= words(part)
-    return tokens
-
-
-def build_queries(artist, title, catno):
-    """The searches to try for a track: one for each artist in the credit
-    and, if the vinyl has a catalog number, one more with it
-    ("SEMID026 R U Listening..."): small labels usually title their uploads
-    by catalog number, not artist."""
-    queries = [f"{part} {title}" for part in split_artists(artist)] or [title]
-    if catno:
-        queries.append(f"{catno} {title}")
-    return queries
-
-
-# Signs that the video is not ONE track but the whole EP or a label
-# preview ("R U Listening EP inc Sweely Remix", 8:34).
-# They pass the title and artist checks and only duration reveals them;
-# that's why rescue (which loosens duration) excludes them: a mini-mix
-# blends multiple tempos and would measure anything.
-COMPILATION_WORDS = {"ep", "lp", "va", "inc", "incl", "minimix", "megamix",
-                     "preview", "previews", "snippet", "snippets",
-                     "sampler", "showreel", "teaser"}
-
-
-def seems_compilation(video_title):
-    clean = "".join(c.lower() if c.isalnum() else " " for c in video_title)
-    return bool(set(clean.split()) & COMPILATION_WORDS)
-
-
-# Threshold for character-by-character comparison (see partial_similarity):
-# above this we treat it as "same title".
-FUZZY_THRESHOLD = 0.75
-
-
-def compact(text):
-    """Leaves only lowercase letters and numbers, no spaces or punctuation —
-    to compare "Snap-Shot" with "Snapshot" or "Sugar Coated" with "Sugarcoated"
-    as the same text."""
-    return "".join(c.lower() for c in text if c.isalnum())
-
-
-def partial_similarity(a, b):
-    """How well the shorter of the two texts fits INSIDE the longer one,
-    character by character. Unlike comparing the two strings end-to-end,
-    this doesn't penalize the candidate bringing extra decoration
-    (label name, artist, etc.)."""
-    a, b = compact(a), compact(b)
-    if not a or not b:
-        return 0.0
-    short, long = (a, b) if len(a) <= len(b) else (b, a)
-    best = 0.0
-    for i in range(len(long) - len(short) + 1):
-        best = max(best, difflib.SequenceMatcher(None, short, long[i:i + len(short)]).ratio())
-        if best == 1.0:
-            break
-    return best
-
-
-def title_matches(track_title, candidate_title):
-    """True if the candidate seems to be the same song: shares half the words
-    with the Discogs one (normal check), or — when written differently, hyphenated,
-    without space, or with one extra/missing letter, as often happens on Bandcamp —
-    the text is similar enough character by character."""
-    target = words(track_title)
-    candidate_words = words(candidate_title)
-    if target and len(target & candidate_words) / len(target) >= 0.5:
-        return True
-    return partial_similarity(track_title, candidate_title) >= FUZZY_THRESHOLD
-
-
-def select_videos(candidates, artist, track_title, target_duration):
-    """Separates search results into two lists and returns (approved, rescue),
-    both sorted from best to worst duration match. Approved ones pass all three
-    checks; rescue ones match title and artist but NOT duration, serving as
-    a last resort (see rescue in analyze_track). They're lists not single videos
-    so if the best one fails to download — SoundCloud serves some tracks with
-    DRM — the next one can be tried.
-
-    Three checks, because each one alone can fail:
-      - the video title must be (or closely match) the track title (otherwise,
-        in an EP the search gives you another song by the same artist with
-        similar duration),
-      - the artist must appear in the video title or the channel that uploaded it
-        (otherwise, "Free The Drums" matches any video saying "FREE DOWNLOAD ... drums"),
-        and
-      - the duration must match Discogs' (if available); if not, it picks any of
-        "Song X" vs "Song X (Remix)".
-    """
-    tokens = artist_tokens(artist)
-
-    approved = []
-    rescue = []
-    for video in candidates:
-        dur = video.get("duration")
-        if not dur:
-            continue
-
-        video_title = video.get("title", "")
-        if not title_matches(track_title, video_title):
-            continue
-
-        channel = video.get("uploader") or video.get("channel") or ""
-        if tokens and not tokens & (words(video_title) | words(channel)):
-            continue
-
-        if target_duration:
-            tolerance = max(TOLERANCE_SECONDS, target_duration * TOLERANCE_PERCENTAGE)
-            difference = abs(dur - target_duration)
-            if difference <= tolerance:
-                approved.append((difference, video))
-            elif 120 <= dur <= 900 and not seems_compilation(video_title):
-                rescue.append((difference, video))
-        elif 120 <= dur <= 900:
-            approved.append((0, video))
-    approved.sort(key=lambda pair: pair[0])
-    rescue.sort(key=lambda pair: pair[0])
-    return [v for _, v in approved], [v for _, v in rescue]
-
-
 def search_bandcamp(artist, title, target_duration, catno=None):
     """Searches for the track on Bandcamp and returns (approved, rescue)
     like select_videos, with dicts {title, url, duration, uploader}.
@@ -349,6 +273,7 @@ def search_bandcamp(artist, title, target_duration, catno=None):
 
     candidates = []
     seen = set()
+    failures = []
     for query in queries:
         try:
             resp = requests.post(
@@ -363,7 +288,10 @@ def search_bandcamp(artist, title, target_duration, catno=None):
             )
             resp.raise_for_status()
             results = resp.json().get("auto", {}).get("results") or []
-        except (requests.RequestException, ValueError):
+            if not isinstance(results, list):
+                raise TypeError("results is not a list")
+        except (requests.RequestException, ValueError, TypeError, AttributeError) as error:
+            failures.append(summarize_error(error))
             continue
 
         for r in results:
@@ -384,11 +312,15 @@ def search_bandcamp(artist, title, target_duration, catno=None):
         try:
             with YoutubeDL(base_options()) as ydl:
                 info = ydl.extract_info(url, download=False)
-        except Exception:
+            if not isinstance(info, dict):
+                raise TypeError("invalid Bandcamp track metadata")
+        except Exception as error:
+            failures.append(summarize_error(error))
             continue
 
         dur = info.get("duration")
         if not dur:
+            failures.append("Bandcamp track metadata has no duration")
             continue
         video = {
             "title": info.get("title") or f"{candidate.get('band_name', '')} - {candidate.get('name', '')}",
@@ -404,6 +336,8 @@ def search_bandcamp(artist, title, target_duration, catno=None):
                 rescue.append(video)
         elif 120 <= dur <= 900:
             return [video], rescue
+    if failures and not rescue:
+        raise AudioProviderError(" | ".join(failures))
     return [], rescue
 
 
@@ -427,9 +361,9 @@ def measure_bpm(audio_path, video_duration):
 
     Returns (bpm, alternative, doubtful):
       - detectors agree:      (bpm, None, False) — reliable number
-        (you still validate it in edit_bpm.py, nothing validates itself),
+        (you still validate it in the editor, nothing validates itself),
       - detectors disagree:   (deeprhythm, librosa, True) —
-        the first is saved, marked for confirmation in edit_bpm.py,
+        the first is saved, marked for confirmation in the editor,
       - only one measured:    (that bpm, None, True if librosa),
       - couldn't measure any: (None, None, False).
 
@@ -616,7 +550,7 @@ def analyze_track(
     need_key=True,
 ):
     """Searches for the track (Bandcamp first, YouTube and SoundCloud if not),
-    downloads the best candidate, and returns (AudioAnalysis, detail).
+    downloads the best candidate, and returns (AudioAnalysis, AudioSource).
 
     ``need_bpm`` and ``need_key`` decide which result makes a candidate useful.
     This matters when a track already has BPM but still needs a key: a candidate
@@ -629,6 +563,7 @@ def analyze_track(
                 or (need_key and result.key is not None))
 
     reasons = []
+    retryable_reasons = []
     rescues = []  # (searcher, video) matching everything except duration
     for name, prefix in [("Bandcamp", None)] + SEARCHERS:
         try:
@@ -650,7 +585,9 @@ def analyze_track(
                             candidates.append(entry)
                 videos, rescue = select_videos(candidates, artist, title, target_duration)
         except Exception as e:
-            reasons.append(f"{name}: {summarize_error(e)}")
+            reason = f"{name}: {summarize_error(e)}"
+            reasons.append(reason)
+            retryable_reasons.append(reason)
             continue
 
         rescues.extend((name, video) for video in rescue)
@@ -667,12 +604,16 @@ def analyze_track(
                     video, tmpdir, need_bpm=need_bpm, need_key=need_key
                 )
             except Exception as e:
-                reasons.append(f"{name}: {summarize_error(e)}")
+                reason = f"{name}: {summarize_error(e)}"
+                reasons.append(reason)
+                retryable_reasons.append(reason)
                 continue
             if not found_needed(result):
-                reasons.append(f"{name}: couldn't measure the missing BPM/key")
+                reason = f"{name}: couldn't measure the missing BPM/key"
+                reasons.append(reason)
+                retryable_reasons.append(reason)
                 continue
-            return result, f"{video.get('title', '')} [{name}]"
+            return result, audio_source(name, video)
 
     # Rescue pass: no one passed the complete filter, but these candidates
     # match title and artist and only fail on duration. It's almost always
@@ -687,26 +628,33 @@ def analyze_track(
                 video, tmpdir, need_bpm=need_bpm, need_key=need_key
             )
         except Exception as e:
-            reasons.append(f"{name}: {summarize_error(e)}")
+            reason = f"{name}: {summarize_error(e)}"
+            reasons.append(reason)
+            retryable_reasons.append(reason)
             continue
         if not found_needed(result):
-            reasons.append(f"{name}: couldn't measure the missing BPM/key")
+            reason = f"{name}: couldn't measure the missing BPM/key"
+            reasons.append(reason)
+            retryable_reasons.append(reason)
             continue
         result = replace(
             result,
             bpm_doubtful=result.bpm is not None,
             key_doubtful=result.key is not None,
         )
-        detail = (f"{video.get('title', '')} [{name}; note: lasts "
-                  f"{format_duration(video['duration'])} but Discogs says "
-                  f"{format_duration(target_duration)} — different edition?]")
-        return result, detail
+        note = (f"note: lasts {format_duration(video['duration'])} but Discogs says "
+                f"{format_duration(target_duration)} — different edition?")
+        return result, audio_source(name, video, note=note)
 
-    return AudioAnalysis(), " | ".join(reasons)
+    return AudioAnalysis(), AudioSource(
+        note=" | ".join(reasons),
+        analysis_version=None,
+        retryable=bool(retryable_reasons),
+    )
 
 
-def main():
-    args = parse_arguments()
+def main(arguments=None):
+    args = parse_arguments(arguments)
     process_all = args.all
     limit = args.limit
 
@@ -722,12 +670,19 @@ def main():
         FROM tracks
         JOIN releases ON releases.release_id = tracks.release_id
         WHERE (tracks.bpm IS NULL OR tracks.key IS NULL)
-          AND (? OR NOT EXISTS (
-              SELECT 1 FROM workflow_steps
-              WHERE workflow_steps.release_id = releases.release_id
-                AND step = 'analyze'
+          AND (? OR (
+              NOT EXISTS (
+                  SELECT 1 FROM workflow_steps
+                  WHERE workflow_steps.release_id = releases.release_id
+                    AND step = 'analyze'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM track_workflow_steps
+                  WHERE track_workflow_steps.track_id = tracks.id
+                    AND step = 'analyze'
+              )
           ))
-        ORDER BY releases.artist, releases.title, tracks.id
+        ORDER BY releases.artist, releases.title, tracks.sort_order, tracks.id
         """,
         (int(process_all),),
     )
@@ -754,7 +709,7 @@ def main():
         conn.commit()
         conn.close()
         print("Nothing new to analyze. Use --all to revisit old missing BPMs/keys.")
-        return
+        return 0
     print("(this downloads audio and measures BPM/key here; full-track key analysis")
     print(" can take longer than 30s per track,")
     print(" you can stop with Ctrl+C and resume later)")
@@ -768,13 +723,15 @@ def main():
     keys_found = 0
     keys_doubtful = 0
     attempted = set()
+    errors = 0
+    interrupted = False
     with tempfile.TemporaryDirectory() as tmpdir:
         for i, row in enumerate(pending, start=1):
             label = f"[{i}/{len(pending)}] {row['artist']} - {row['title']}"
             need_bpm = row["bpm"] is None
             need_key = row["key"] is None
             try:
-                result, detail = analyze_track(
+                result, source = analyze_track(
                     row["artist"], row["title"],
                     parse_duration(row["duration_display"]), tmpdir,
                     row["catno"],
@@ -783,19 +740,34 @@ def main():
                 )
             except KeyboardInterrupt:
                 print("\nStopped. What was analyzed is saved.")
+                interrupted = True
                 break
             except Exception as e:
                 print(f"{label}\n   -> error, continuing: {e}")
+                errors += 1
+                continue
+
+            if source.retryable:
+                print(f"{label}\n   -> {source.detail} (will retry)")
+                errors += 1
                 continue
 
             updates = []
             if need_bpm and result.bpm is not None:
                 cursor.execute(
-                    "UPDATE tracks SET bpm = ?, bpm_source = 'youtube',"
+                    "UPDATE tracks SET bpm = ?, bpm_source = ?,"
                     " bpm_alt = ?, bpm_needs_review = ?, bpm_verified = 0 WHERE id = ?",
-                    (result.bpm, result.bpm_alt, int(result.bpm_doubtful), row["id"]),
+                    (
+                        result.bpm,
+                        source.platform,
+                        result.bpm_alt,
+                        int(result.bpm_doubtful),
+                        row["id"],
+                    ),
                 )
-                record_bpm_source(conn, row["id"], "youtube", result.bpm, detail)
+                record_bpm_source(
+                    conn, row["id"], source.platform, result.bpm, source.detail
+                )
                 bpm_found += 1
                 bpm_doubtful += int(result.bpm_doubtful)
                 if result.bpm_doubtful and result.bpm_alt is not None:
@@ -827,7 +799,7 @@ def main():
                         estimate.source,
                         estimate.key,
                         estimate.strength,
-                        detail,
+                        source.detail,
                     )
                 keys_found += 1
                 keys_doubtful += int(result.key_doubtful)
@@ -841,11 +813,15 @@ def main():
                 updates.append(f"key {key_text}")
 
             if updates:
-                print(f"{label} -> {', '.join(updates)}\n   (measured from: {detail})")
+                print(
+                    f"{label} -> {', '.join(updates)}\n"
+                    f"   (measured from: {source.detail})"
+                )
             else:
-                print(f"{label}\n   -> {detail}")
+                print(f"{label}\n   -> {source.detail}")
 
             attempted.add(row["id"])
+            mark_track_workflow_step(conn, row["id"], "analyze")
             conn.commit()
 
             # Pause between tracks to reduce source rate limiting. Do not make
@@ -865,12 +841,15 @@ def main():
     print(f"BPM measured: {bpm_found} ({bpm_doubtful} need review).")
     print(f"Keys measured: {keys_found} ({keys_doubtful} need review).")
     if bpm_doubtful or keys_doubtful:
-        print("Review detector disagreements in the editor: python edit_bpm.py")
+        print("Review detector disagreements: python -m vinyl_labels edit")
     else:
         print("The detectors agreed on every locally measured key.")
     if bpm_found:
-        print("Fallback BPMs still need your validation in: python edit_bpm.py")
+        print("Validate fallback BPMs with: python -m vinyl_labels edit")
+    if interrupted:
+        return 130
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

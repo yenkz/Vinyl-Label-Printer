@@ -20,16 +20,20 @@ will be picked up by the next run after you validate them. Every run also
 compares the current database-backed rendering with the image on disk: changed
 labels are replaced, while identical ones are left untouched.
 
+Superseded pending filenames are moved to labels_output/obsolete/. Confirmed
+files under labels_output/printed/ are retained as immutable print history.
+
 Images are saved in the labels_output/ folder, with names like
 "Artist - Record (id).png", ready for print_labels.py to send to the printer.
 
 How to run it:
-    python render_labels.py              # generate labels for new records
-    python render_labels.py --all        # regenerate ALL labels
-    python render_labels.py aphex        # only records containing "aphex"
-    python render_labels.py aphex --view # also open them in Preview
+    python -m vinyl_labels render              # generate labels for new records
+    python -m vinyl_labels render --all        # regenerate all labels
+    python -m vinyl_labels render aphex        # filter records
+    python -m vinyl_labels render aphex --view # also open in Preview
 """
 
+import argparse
 import re
 import subprocess
 import sys
@@ -37,11 +41,12 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-import config
-from common import to_camelot
-from db import get_connection, init_db, mark_workflow_step
+from vinyl_labels import config
+from vinyl_labels.common import to_camelot
+from vinyl_labels.db import get_connection, init_db, mark_workflow_step
+from vinyl_labels.paths import project_path
 
-OUTPUT_DIR = Path(__file__).parent / config.OUTPUT_DIR
+OUTPUT_DIR = project_path(config.OUTPUT_DIR)
 
 # --- Label design measurements (in pixels, at 300dpi) ---
 MARGIN = 16
@@ -80,7 +85,7 @@ def load_cover(release):
     print it, so what you see on screen is what comes out on paper."""
     if not release["cover_path"]:
         return None
-    path = Path(__file__).parent / release["cover_path"]
+    path = project_path(release["cover_path"])
     if not path.exists():
         return None
     try:
@@ -105,6 +110,92 @@ def file_name(release):
     base = f"{release['artist']} - {release['title']}"
     base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base).strip(" .")
     return f"{base[:120]} ({release['release_id']}).png"
+
+
+# Keep the release ID as the durable identity of a rendered artifact. Artist
+# and title make filenames pleasant to browse, but Discogs may correct either
+# one after a label has already been rendered.
+RELEASE_ID = re.compile(r"\((?P<release_id>[1-9]\d*)\)\.png\Z", re.IGNORECASE)
+
+
+def release_id_from_path(path):
+    """Returns the positive release ID encoded at the end of a label name."""
+    match = RELEASE_ID.search(Path(path).name)
+    return int(match.group("release_id")) if match else None
+
+
+def artifacts_for_release(directory, release_id):
+    """Finds direct-child PNG artifacts belonging to ``release_id``."""
+    directory = Path(directory)
+    return sorted(
+        path
+        for path in directory.glob("*.png")
+        if release_id_from_path(path) == int(release_id)
+    )
+
+
+def unique_artifact_path(directory, name):
+    """Returns a non-destructive destination while retaining the ID suffix."""
+    directory = Path(directory)
+    candidate = directory / name
+    if not candidate.exists():
+        return candidate
+
+    match = RELEASE_ID.search(name)
+    if not match:
+        stem = Path(name).stem
+        suffix = Path(name).suffix
+        for number in range(2, sys.maxsize):
+            candidate = directory / f"{stem} [revision {number}]{suffix}"
+            if not candidate.exists():
+                return candidate
+
+    prefix = name[:match.start()].rstrip()
+    release_suffix = match.group(0)
+    for number in range(2, sys.maxsize):
+        candidate = directory / f"{prefix} [revision {number}] {release_suffix}"
+        if not candidate.exists():
+            return candidate
+
+    raise RuntimeError(f"Couldn't choose a unique artifact name for {name}")
+
+
+def archive_pending_artifacts(output_dir, release_id, keep=None):
+    """Moves obsolete pending versions out of the printer's input directory.
+
+    Nothing is deleted, and ``printed/`` is deliberately never inspected or
+    modified: it is the physical print history. The returned paths are useful
+    for reporting and tests.
+    """
+    output_dir = Path(output_dir)
+    keep = Path(keep) if keep is not None else None
+    obsolete = [
+        path
+        for path in artifacts_for_release(output_dir, release_id)
+        if keep is None or path != keep
+    ]
+    if not obsolete:
+        return []
+
+    archive_dir = output_dir / "obsolete"
+    archive_dir.mkdir(exist_ok=True)
+    archived = []
+    for path in obsolete:
+        destination = unique_artifact_path(archive_dir, path.name)
+        path.rename(destination)
+        archived.append(destination)
+    return archived
+
+
+def archive_orphaned_pending(output_dir, current_release_ids):
+    """Archives pending labels whose release is no longer in the collection."""
+    current_release_ids = {int(release_id) for release_id in current_release_ids}
+    archived = []
+    for path in sorted(Path(output_dir).glob("*.png")):
+        release_id = release_id_from_path(path)
+        if release_id is not None and release_id not in current_release_ids:
+            archived.extend(archive_pending_artifacts(output_dir, release_id))
+    return archived
 
 
 def render_release(release, tracks, font_title, font_text, font_bpm, font_meta):
@@ -218,15 +309,22 @@ def same_image(rendered, path):
         return False
 
 
-def main():
-    arguments = sys.argv[1:]
-    open_preview = "--view" in arguments
-    process_all = "--all" in arguments
-    filter_text = next((a.lower() for a in arguments if not a.startswith("--")), "")
-    unknown_options = [a for a in arguments if a.startswith("--") and a not in ("--view", "--all")]
-    if unknown_options:
-        print(__doc__)
-        return
+def parse_arguments(arguments=None):
+    parser = argparse.ArgumentParser(
+        prog="python -m vinyl_labels render",
+        description="Render validated vinyl labels.",
+    )
+    parser.add_argument("filter", nargs="?", help="artist/record text to match")
+    parser.add_argument("--view", action="store_true", help="open newly rendered labels")
+    parser.add_argument("--all", action="store_true", help="force regeneration")
+    return parser.parse_args(arguments)
+
+
+def main(arguments=None):
+    args = parse_arguments(arguments)
+    open_preview = args.view
+    process_all = args.all
+    filter_text = (args.filter or "").lower()
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -240,16 +338,25 @@ def main():
     releases = cursor.fetchall()
 
     if not releases:
-        print("Your collection is empty. Run first: python fetch_discogs.py")
+        print("Your collection is empty. Run first: python -m vinyl_labels fetch")
         conn.close()
-        return
+        return 1
+
+    orphaned = archive_orphaned_pending(
+        OUTPUT_DIR, (release["release_id"] for release in releases)
+    )
+    if orphaned:
+        print(
+            f"Archived {len(orphaned)} obsolete pending label(s) for releases "
+            "no longer in the collection."
+        )
 
     if filter_text:
         releases = [r for r in releases if filter_text in f"{r['artist']} {r['title']}".lower()]
         if not releases:
             print(f"No record in your collection contains '{filter_text}'.")
             conn.close()
-            return
+            return 1
 
     font_title, font_text, font_bpm, font_meta = load_fonts()
 
@@ -261,7 +368,7 @@ def main():
     force_render = process_all or bool(filter_text)
     for release in releases:
         cursor.execute(
-            "SELECT * FROM tracks WHERE release_id = ? ORDER BY id",
+            "SELECT * FROM tracks WHERE release_id = ? ORDER BY sort_order, id",
             (release["release_id"],),
         )
         tracks = cursor.fetchall()
@@ -273,6 +380,12 @@ def main():
             if track["bpm"] is not None and track["bpm_verified"]
         )
         if validated != len(tracks):
+            archived = archive_pending_artifacts(OUTPUT_DIR, release["release_id"])
+            if archived:
+                print(
+                    f"Archived {len(archived)} no-longer-printable pending "
+                    f"label(s) for release {release['release_id']}."
+                )
             waiting_for_validation += 1
             print(
                 f"Waiting for validation: {release['artist']} - {release['title']} "
@@ -284,15 +397,42 @@ def main():
 
         name = file_name(release)
         output_path = OUTPUT_DIR / name
-        printed_path = OUTPUT_DIR / "printed" / name
+        # A metadata rename changes the readable filename. Retire every older
+        # pending name for this ID before writing the canonical one, otherwise
+        # print_labels.py could see two copies of the same record.
+        archived = archive_pending_artifacts(
+            OUTPUT_DIR, release["release_id"], keep=output_path
+        )
+        if archived:
+            print(
+                f"Archived {len(archived)} superseded pending label(s) for "
+                f"release {release['release_id']}."
+            )
 
         img = render_release(release, tracks, font_title, font_text, font_bpm, font_meta)
-        existing_path = (
-            output_path if output_path.exists()
-            else printed_path if printed_path.exists()
-            else None
+        pending_existing = output_path if output_path.exists() else None
+        printed_versions = artifacts_for_release(
+            OUTPUT_DIR / "printed", release["release_id"]
         )
-        if not force_render and existing_path and same_image(img, existing_path):
+        existing_versions = (
+            ([pending_existing] if pending_existing else []) + printed_versions
+        )
+        matching_existing = next(
+            (path for path in existing_versions if same_image(img, path)), None
+        )
+        if not force_render and matching_existing:
+            # If the current pixels match print history but a different image
+            # is still pending under the canonical name, it is stale and must
+            # not remain eligible for printing.
+            if pending_existing and matching_existing != pending_existing:
+                archived = archive_pending_artifacts(
+                    OUTPUT_DIR, release["release_id"]
+                )
+                if archived:
+                    print(
+                        f"Archived {len(archived)} stale pending label(s) for "
+                        f"release {release['release_id']}."
+                    )
             mark_workflow_step(conn, release["release_id"], "render")
             conn.commit()
             unchanged += 1
@@ -303,7 +443,7 @@ def main():
         conn.commit()
         generated_paths.append(output_path)
         generated += 1
-        if existing_path:
+        if existing_versions:
             updated += 1
             print(f"Updated: {name}")
         else:
@@ -326,11 +466,12 @@ def main():
         subprocess.run(["open", *map(str, generated_paths)])
 
     if generated:
-        print("Next step: python print_labels.py --test  (to see what would print)")
-        print("        or: python print_labels.py         (to print)")
+        print("Next step: python -m vinyl_labels print --test  (dry run)")
+        print("        or: python -m vinyl_labels print         (print)")
     elif waiting_for_validation:
         print("Next step: make edit  (validate every track, then run make render again)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

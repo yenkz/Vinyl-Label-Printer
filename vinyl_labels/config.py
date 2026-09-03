@@ -7,18 +7,18 @@ printer and label configuration, which you generally don't need to touch.
 """
 
 import os
-from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .paths import PROJECT_ROOT
+
 # Load variables from the .env file in this directory.
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(PROJECT_ROOT / ".env")
 
 # =========================================================
 # 1) PERSONAL DATA (comes from the .env file)
 # =========================================================
 DISCOGS_USER_TOKEN = os.environ.get("DISCOGS_USER_TOKEN", "")
-DISCOGS_USERNAME = os.environ.get("DISCOGS_USERNAME", "")
 # OPTIONAL. Spotify app (https://developer.spotify.com/dashboard)
 # to enrich labels: album cover, missing durations from Discogs, and ISRC.
 # Note: new Spotify apps do NOT have BPM access (audio-features blocked since Nov 2024).

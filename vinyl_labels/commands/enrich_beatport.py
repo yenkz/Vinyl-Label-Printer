@@ -28,26 +28,26 @@ For not importing tracks from different songs, the candidate must match the
 artist, title (including remix/mix name), and duration according to Discogs.
 
 How to run it:
-    python enrich_beatport.py        # tracks from newly imported records
-    python enrich_beatport.py 5      # only 5 (for testing)
-    python enrich_beatport.py --all  # deliberately revisit every track
+    python -m vinyl_labels beatport        # newly imported records
+    python -m vinyl_labels beatport 5      # only 5 (for testing)
+    python -m vinyl_labels beatport --all  # revisit every track
 """
 
+import argparse
 import re
-import sys
 import time
 
 import requests
 
-from common import (
-    to_camelot,
+from vinyl_labels.common import (
     fit_to_range,
+    looks_similar,
     normalize,
     normalize_key,
     parse_duration,
-    looks_similar,
+    to_camelot,
 )
-from db import (
+from vinyl_labels.db import (
     get_connection,
     init_db,
     mark_workflow_step,
@@ -83,6 +83,25 @@ TOLERANCE_BPM = 2.5
 
 # The anonymous token lasts 10 minutes; we renew it only when it expires.
 _token = {"value": None, "expires": 0.0}
+
+
+class BeatportError(RuntimeError):
+    """Beatport could not answer reliably; the operation should be retried."""
+
+
+def parse_arguments(arguments=None):
+    parser = argparse.ArgumentParser(
+        prog="python -m vinyl_labels beatport",
+        description="Enrich track metadata from Beatport."
+    )
+    parser.add_argument("limit", nargs="?", type=int, help="maximum tracks to check")
+    parser.add_argument(
+        "--all", action="store_true", help="revisit the whole collection"
+    )
+    args = parser.parse_args(arguments)
+    if args.limit is not None and args.limit < 1:
+        parser.error("limit must be a positive integer")
+    return args
 
 
 def credentials_from_embed():
@@ -130,7 +149,12 @@ def current_token():
             continue
         if resp.status_code != 200:
             continue
-        data = resp.json()
+        try:
+            data = resp.json()
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if not isinstance(data, dict):
+            continue
         if data.get("access_token"):
             _token["value"] = data["access_token"]
             # Renew a minute before expiry, just in case.
@@ -143,12 +167,12 @@ def search_beatport(artist, title, target_duration):
     """Searches for the track on Beatport and returns the API track dict that
     truly matches (artist, title, and duration), or None.
 
-    Raises RuntimeError if the token is unavailable (to stop the run instead of
+    Raises BeatportError if the token is unavailable (to stop the run instead of
     printing "not found" a thousand times).
     """
     token = current_token()
     if token is None:
-        raise RuntimeError("Beatport did not renew the anonymous token")
+        raise BeatportError("Beatport did not renew the anonymous token")
 
     # Beatport separates the remix name ("Juaan Remix") from the title;
     # for the search we use the bare title and check the remix later
@@ -166,14 +190,19 @@ def search_beatport(artist, title, target_duration):
             headers={"Authorization": f"Bearer {token}", **BROWSER},
             timeout=15,
         )
-        if resp.status_code != 200:
-            return None
+        resp.raise_for_status()
         results = resp.json().get("results") or []
-    except (requests.RequestException, ValueError):
-        return None
+        if not isinstance(results, list):
+            raise TypeError("results is not a list")
+    except requests.RequestException as error:
+        raise BeatportError(f"Beatport search request failed: {error}") from error
+    except (ValueError, TypeError, AttributeError) as error:
+        raise BeatportError("Beatport returned an invalid search response") from error
 
     best = []
     for track in results:
+        if not isinstance(track, dict):
+            raise BeatportError("Beatport returned an invalid track result")
         name = track.get("name") or ""
         mix = (track.get("mix_name") or "").strip()
         # "Original Mix" adds nothing; any other mix is part of the
@@ -205,20 +234,10 @@ def search_beatport(artist, title, target_duration):
     return min(best, key=lambda pair: pair[0])[1]
 
 
-def main():
-    arguments = sys.argv[1:]
-    process_all = "--all" in arguments
-    arguments = [arg for arg in arguments if arg != "--all"]
-    limit = None
-    if arguments:
-        try:
-            limit = int(arguments[0])
-        except (ValueError, IndexError):
-            print(__doc__)
-            return
-    if len(arguments) > 1:
-        print(__doc__)
-        return
+def main(arguments=None):
+    args = parse_arguments(arguments)
+    process_all = args.all
+    limit = args.limit
 
     init_db()
     conn = get_connection()
@@ -273,7 +292,7 @@ def main():
               )
           AND (? OR NOT EXISTS (SELECT 1 FROM bpm_sources
                                 WHERE track_id = tracks.id AND source = 'beatport'))
-        ORDER BY releases.artist, releases.title, tracks.id
+        ORDER BY releases.artist, releases.title, tracks.sort_order, tracks.id
         """,
         (int(process_all), int(process_all)),
     )
@@ -291,16 +310,17 @@ def main():
         if previously_confirmed:
             print(f"Auto-confirmed {previously_confirmed} existing Beatport BPMs.")
         print("Nothing new to check. Use --all to revisit the whole collection.")
-        return
+        return 0
     print("Connecting to Beatport (anonymous token from embedded player)...")
     if current_token() is None:
         print(
             "Could not get Beatport's anonymous token.\n"
             "It might be a connection issue, or Beatport changed its\n"
             "embedded player. Try again later; in the meantime\n"
-            "the rest of the workflow still works (analyze_bpm.py)."
+            "the rest of the workflow still works (`python -m vinyl_labels analyze`)."
         )
-        return
+        conn.close()
+        return 1
     print("Connected.\n")
 
     stats = {
@@ -311,6 +331,7 @@ def main():
         "isrc": 0,
     }
     attempted = set()
+    provider_failed = False
     for i, row in enumerate(pending, start=1):
         # If the record has multiple artists we store them as
         # "Artist 1 / Artist 2"; for searching we use only the first one.
@@ -321,8 +342,9 @@ def main():
             candidate = search_beatport(
                 artist, row["title"], parse_duration(row["duration_display"])
             )
-        except RuntimeError as e:
+        except BeatportError as e:
             print(f"\nStopping here: {e}. What was saved so far is preserved.")
+            provider_failed = True
             break
 
         if not candidate:
@@ -435,6 +457,10 @@ def main():
                     (row["id"],),
                 )
                 updates.append("Beatport confirms key")
+            elif row["key_verified"]:
+                updates.append(
+                    f"Beatport key {key} (keeping your confirmed {row['key']})"
+                )
             else:
                 cursor.execute(
                     "UPDATE tracks SET key = ?, key_source = 'beatport', key_alt = NULL,"
@@ -484,10 +510,11 @@ def main():
         "Matched Beatport BPMs are already confirmed; "
         "the editor is only needed for the rest."
     )
-    print("Next step: python enrich_bandcamp.py  (covers/durations that are missing)")
-    print("        or: python analyze_bpm.py      (measure what Beatport didn't have)")
-    print("        or: python edit_bpm.py         (validate BPMs, source by source)")
+    print("Next step: python -m vinyl_labels bandcamp  (missing covers/durations)")
+    print("        or: python -m vinyl_labels analyze   (audio fallback)")
+    print("        or: python -m vinyl_labels edit      (validate BPMs)")
+    return 1 if provider_failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

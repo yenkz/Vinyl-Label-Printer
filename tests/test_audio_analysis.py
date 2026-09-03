@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-import analyze_bpm
-import db
+from vinyl_labels import db
+from vinyl_labels.commands import analyze_bpm
 
 
 class ChromaKeyTests(unittest.TestCase):

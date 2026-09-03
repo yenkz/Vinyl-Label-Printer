@@ -33,7 +33,7 @@ roll (DK-2251).
   by this software. The safe choice.
 - **Brother QL-600 / QL-600B**: also works with this project (slower and
   slightly cheaper). If you choose it, set `PRINTER_MODEL = "QL-600"`
-  in `config.py`.
+  in `vinyl_labels/config.py`.
 
 Both use the same DK rolls. For this project, the **continuous white 62mm roll
 (DK-2251)** is enough: each label comes out exactly as long as needed based on
@@ -51,11 +51,11 @@ the number of tracks.
    ```
    make setup
    ```
-   (installs dependencies in a project-specific environment and creates the `.env` file)
+   (installs the exact versions from `uv.lock` in a project-specific environment
+   and creates the `.env` file)
 4. Copy `.env.example` as `.env` and fill in your personal data there
    (the `make setup` above already copies it for you):
    - Your Discogs token (`DISCOGS_USER_TOKEN`)
-   - Your Discogs username (`DISCOGS_USERNAME`)
    - (Optional) credentials for a Spotify app
      (`SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET`, free at
      https://developer.spotify.com/dashboard) — used for step 4, the final
@@ -65,7 +65,8 @@ the number of tracks.
      Bandcamp don't need credentials: those steps work unconfigured.
 
    The `.env` file is not uploaded to git, so your tokens stay only on your
-   computer. Technical settings (printer model, fonts, etc.) remain in `config.py`:
+   computer. Technical settings (printer model, fonts, etc.) remain in
+   `vinyl_labels/config.py`:
    edit `PRINTER_MODEL` there if your printer isn't the QL-800.
 
 ## Usage (each time you want to generate labels)
@@ -83,26 +84,31 @@ make analyze     # missing BPMs or keys on new records only
 make render      # create/update labels with 100% validated BPMs
 ```
 
-`make todo` runs the automatic chain in one go. To deliberately revisit the
+`make todo` runs the complete automatic chain sequentially, including the slow
+audio-analysis fallback; it stops at the first operational failure instead of
+recording a temporary provider outage as a permanent miss. To deliberately revisit the
 whole collection, add `full=1` to any command—for example `make beatport
 full=1`, `make render full=1`, or `make todo full=1`. Naming a render filter is
 also explicit, so `make render d=aphex` regenerates the matching record even if
 it is not new.
 
-The scripts can also be run directly in order:
+There is also one consistent command-line front door. For example,
+`python -m vinyl_labels workflow --limit 20 --pace 8`,
+`python -m vinyl_labels fetch --all`, or `python -m vinyl_labels render aphex`.
+Run `make check` for software tests and `make print-test` for the printer dry run.
+Run `make backup` whenever you want an additional manual database snapshot.
+
+The same workflow is available through the package CLI:
 
 ```
-python fetch_discogs.py    # 1. Fetch NEW records and covers from Discogs
-python enrich_beatport.py  # 2. BPM and key for new tracks (the reference)
-python enrich_bandcamp.py  # 3. Missing covers/durations (Bandcamp)
-python enrich_spotify.py   # 4. Final fallback: cover, durations, and
-                           #    ISRC from Spotify (optional)
-python analyze_bpm.py      # 5. Audio fallback: measures missing BPM/key,
-                           #    downloading audio temporarily (slow but effective!)
-python edit_bpm.py         # 6. The editor: load/correct by hand and
-                           #    VALIDATE each BPM by viewing its sources
-python render_labels.py    # 7. Create/update fully validated labels
-python print_labels.py     # 8. Print pending labels on the Brother QL
+python -m vinyl_labels fetch      # 1. Collection + covers from Discogs
+python -m vinyl_labels beatport   # 2. BPM and key from Beatport
+python -m vinyl_labels bandcamp   # 3. Missing covers/durations
+python -m vinyl_labels spotify    # 4. Final optional fallback
+python -m vinyl_labels analyze    # 5. Local audio analysis fallback
+python -m vinyl_labels edit       # 6. Review and validate BPM/key
+python -m vinyl_labels render     # 7. Create validated labels
+python -m vinyl_labels print      # 8. Print pending labels
 ```
 
 Notes:
@@ -138,11 +144,12 @@ Notes:
   resumed later. If
   YouTube enters anti-bot mode ("Sign in to confirm you're not a bot"), the script
   continues on SoundCloud only; YouTube unblocks itself in a few hours, or immediately
-  if you set `YOUTUBE_COOKIES_NAVEGADOR` in `config.py`. Avoid running two analyses
+  if you set `YOUTUBE_COOKIES_BROWSER` in `vinyl_labels/config.py`. Avoid running two analyses
   at once, that's what triggers the anti-bot. To control one batch's size and
   delay between tracks, run `make analyze n=20 pace=8` (20 tracks, waiting 8
   seconds between them). The default pace is 3 seconds; use `pace=0` to disable
-  the delay. The equivalent direct command is `python analyze_bpm.py 20 --pace 8`.
+  the delay. The equivalent CLI command is
+  `python -m vinyl_labels analyze 20 --pace 8`.
   Tempo is measured with **two detectors** (deeprhythm,
   a neural net very accurate for electronic music, and librosa): if they agree,
   the number is reliable; if not — the classic error of measuring 89 when the real
@@ -154,16 +161,17 @@ Notes:
   with both candidates and detector scores visible in `make edit`. Beatport and
   manually entered keys are never overwritten by local analysis.
 - If you already had BPM measured with the old analysis version (single detector),
-  run **once** `python audit_bpm.py`: re-measures all old automatic BPMs, corrects
+  run **once** `python -m vinyl_labels audit`: re-measures all old automatic BPMs, corrects
   ones that were measured wrong, and notes the re-measurement as source — everything
   is ready for step 6 validation.
 - Step 6 (`make edit`) launches a local page (only you see it) with your whole
   collection: search bar, BPM and key fields per track, and each change auto-saves.
   You can write the key in Camelot ("8A") or musical notation ("Am", "f# minor").
   Anything you enter there is saved as `manual` and nothing overwrites it. If you
-  prefer a spreadsheet, the old CSV flow still works: `python bpm_manual.py export` / `import`.
+  prefer a spreadsheet, the CSV flow still works with
+  `python -m vinyl_labels export` / `python -m vinyl_labels import`.
 - Step 6 is where **remaining manual validation** happens: each track shows, as
-  pills, all the BPM sources (for example, "beatport 128" · "youtube 127.9")
+  pills, all the BPM sources (for example, "beatport 128" · "bandcamp 127.9")
   with details of where
   each number came from. Successful Discogs + Beatport matches already show the
   green ✓. For fallback measurements, set it with the ✓ button (current value
@@ -177,17 +185,24 @@ Notes:
 - Step 1 can be repeated when you buy new records: it skips records already
   saved, adds only the delta without duplicating, and removes from the database
   records no longer in your collection. `make fetch full=1` refreshes all saved
-  Discogs metadata while preserving BPM, key, ISRC, and downloaded-audio data.
+  Discogs metadata while preserving BPM, key, ISRC, and downloaded-audio data
+  only when the refreshed title/artist still identifies the same track. Each
+  full refresh—and any run that removes records—first creates a consistent
+  timestamped database backup under `backups/`.
   Discogs rate-limits detailed imports, so those take ~1 second per new record.
-- Step 7 can generate just some records and show them before printing: `python render_labels.py aphex --view`
+- Step 7 can generate just some records and show them before printing:
+  `python -m vinyl_labels render aphex --view`
   generates labels for records containing "aphex" and opens them in Preview to check.
   A record is rendered only when every track has a BPM and its green ✓ in
   `make edit`; incomplete records stay pending for the next `make render` run.
   Existing images are compared pixel-for-pixel with the current database data:
   unchanged labels are skipped, while changed labels are replaced. If the old
   label is already under `labels_output/printed/`, its changed replacement is
-  created in `labels_output/` so it becomes pending for reprinting.
-- Step 8 has a **test mode** that doesn't need a printer: `python print_labels.py --test`
+  created in `labels_output/` so it becomes pending for reprinting. Renamed,
+  duplicate, removed, or no-longer-valid pending images are moved—not deleted—to
+  `labels_output/obsolete/`; printed history is never removed automatically.
+- Step 8 has a **test mode** that doesn't need a printer:
+  `python -m vinyl_labels print --test`
   shows you what labels would print and how many centimeters of roll they'd use,
   without printing or wasting anything.
 - Printing follows the layout from `Fantastic Man - The Axis of People.lbx`:
@@ -195,9 +210,10 @@ Notes:
   error-diffusion monochrome conversion, and an automatic cut after each label.
 - Step 8 only prints new labels. After every USB job, it asks you to confirm
   that the physical label printed and cut completely; only a confirmed label
-  moves to `labels_output/printed/`. To reprint one, move it back to
-  `labels_output/`. You can also print just some:
-  `python print_labels.py aphex` prints those containing "aphex" in the filename.
+  moves to `labels_output/printed/`. To reprint safely after metadata changed,
+  run `python -m vinyl_labels render FILTER --all` to create a current canonical copy.
+  You can also print just some:
+  `python -m vinyl_labels print aphex` prints those containing "aphex" in the filename.
   `make print` refreshes changed renders first, refuses labels that are not 100%
   BPM-validated, and requires physical confirmation after every print.
   To print every pending label continuously without per-label pauses, run
@@ -266,16 +282,14 @@ make download    # downloads everything still missing
 (With Docker, slskd is already running in the background. `make slskd` checks
 it's up / starts it. Binary users: run `make slskd` in its own terminal first.)
 
-Or the scripts directly: `python download_music.py`. Handy variants:
+Or use `python -m vinyl_labels download`. Handy variants:
 
 - `make download d=aphex` — only records matching "aphex" (good for a first test).
 - `make download force=1` — re-download even records already present.
 - `make download j=12` — search 12 records at a time (default is 8).
 
-For each record it first looks for the **whole album from one person** (one
-folder = consistent quality and source), matches that folder's files to your
-track list by title, and queues the best-format copy of each; anything missing
-is then searched **track by track**. Searching runs several records **in
+For each record it searches **track by track**, using each track's artist and
+title and preferring the best available format/source. Searching runs several records **in
 parallel**, and the downloads themselves are slskd's job: the script checks in
 on them every few seconds and files each finished track into the library.
 Sitting in someone's upload queue is normal on Soulseek — sometimes for a long
@@ -295,35 +309,35 @@ rip later.
 
 ```
 .env                -> your personal data (tokens) — not uploaded to git
-config.py           -> technical settings (printer, labels, fonts)
-db.py               -> manages local database (SQLite)
-common.py           -> shared helpers (matching, covers, keys)
-fetch_discogs.py    -> Step 1 (collection + covers, master source)
-enrich_beatport.py  -> Step 2 (BPM and key from Beatport, always)
-enrich_bandcamp.py  -> Step 3 (missing covers/durations)
-enrich_spotify.py   -> Step 4 (final fallback — optional)
-analyze_bpm.py      -> Step 5 (fallback: measures BPM and key from audio)
-audit_bpm.py        -> re-checks old measurements from old version
-edit_bpm.py         -> Step 6 (editor and validator for BPM and key)
-bpm_manual.py       -> Step 6 alternative (CSV export/import)
-render_labels.py    -> Step 7
-print_labels.py     -> Step 8
-download_music.py   -> optional: download digital copies from Soulseek (slskd)
+pyproject.toml       -> direct dependencies and tool configuration
+uv.lock              -> exact, reproducible dependency graph
+vinyl_labels/       -> application package, core modules, and unified CLI
+  commands/         -> fetch/enrichment/analysis/editor/render/print commands
+  templates/        -> editor HTML resource
+tests/              -> unit and integration-style regression tests
 vinyl_labels.db     -> auto-created, stores your entire collection
+backups/            -> automatic pre-migration/refresh SQLite backups
 covers/             -> downloaded covers (one per record)
 labels_output/      -> generated images pending printing
 labels_output/printed/ -> already printed labels
+labels_output/obsolete/ -> archived stale pending labels (never printed)
 ```
+
+The database enables foreign-key checks, WAL concurrency, schema-versioned
+migrations, and value guards automatically. Before a pending migration is
+applied, it creates one SQLite-consistent backup in `backups/`. To restore one,
+stop all project commands, keep the current database as a separate copy, and
+copy the selected backup to `vinyl_labels.db`.
 
 ## Common issues
 
-- **"Font not found"**: open `config.py` and change `FONT_PATH` to the path
+- **"Font not found"**: open `vinyl_labels/config.py` and change `FONT_PATH` to the path
   of a .ttf font you actually have installed. The script still works, just
   looks less polished.
 
 - **Printer won't print / not detected**: check it's plugged in and turned on,
   and on Mac that you've installed libusb. If it still doesn't show up, run
-  `brother_ql discover`, copy the ID it shows and paste it in `config.py`,
+  `brother_ql discover`, copy the ID it shows and paste it in `vinyl_labels/config.py`,
   under `PRINTER_IDENTIFIER`.
 
 - **Status light starts blinking red when a job is sent**: the QL-800 is
@@ -341,7 +355,7 @@ labels_output/printed/ -> already printed labels
   it blocks USB printing.
 
 - **Many tracks without BPM**: it's normal, especially for niche editions or
-  old vinyls. Use `bpm_manual.py export` / `import` to fill them in yourself
+  old vinyls. Use `python -m vinyl_labels export` / `import` to fill them in yourself
   with Shazam, Tunebat, or your ear. Also watch out for automatic BPM in
   electronic music: sometimes they're double or half the real tempo (70
   instead of 140).

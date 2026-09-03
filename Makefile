@@ -14,7 +14,9 @@
 #                      (one time only; make audit n=5 to test)
 #   make edit       -> step 6: review fallback BPM/key detector results
 #   make render     -> step 7: creates/updates 100%-validated labels
-#   make test       -> step 8 in test mode (no printer)
+#   make print-test -> step 8 in test mode (no printer)
+#   make check      -> run the software test suite
+#   make backup     -> create a consistent database backup now
 #   make print      -> step 8: prints pending labels
 #   make print batch=1 -> prints every pending label without pausing
 #
@@ -40,10 +42,10 @@
 # Steps with filter accept d=text (d for record):
 #   make render d=aphex   -> only records containing "aphex"
 #   make view d=aphex     -> same + opens them in Preview
-#   make test d=aphex
+#   make print-test d=aphex
 #   make print d=aphex
 #
-# And to do everything at once (fetch + beatport + bandcamp + spotify + render):
+# And to do everything automatic at once (including the slow audio fallback):
 #   make todo
 
 # uv lives in ~/.local/bin, which is not always in make's PATH,
@@ -52,7 +54,11 @@ UV := $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
 
 PYTHON := .venv/bin/python
 
-.PHONY: help setup fetch beatport bandcamp spotify analyze audit edit export import render view test print todo slskd slskd-status slskd-watch download
+.PHONY: help setup fetch beatport bandcamp spotify analyze audit edit export import render view test print-test check backup print todo slskd slskd-status slskd-watch download
+
+# These targets represent ordered workflows and must remain serial even when a
+# caller invokes make with -j.
+.NOTPARALLEL: todo test print-test print
 
 # slskd (the Soulseek daemon) is usually installed to ~/.local/bin or via a
 # downloaded binary; we look for it on PATH first.
@@ -67,53 +73,62 @@ help:
 
 setup:
 	@test -x "$(UV)" || curl -LsSf https://astral.sh/uv/install.sh | sh
-	@test -d .venv || "$(UV)" venv --python 3.12 .venv
-	"$(UV)" pip install -r requirements.txt --python $(PYTHON)
+	"$(UV)" sync --locked --all-extras --dev
 	@test -f .env || cp .env.example .env
 	@echo "Ready. Now fill in your data in the .env file and run: make fetch"
 
 fetch:
-	$(PYTHON) fetch_discogs.py $(if $(full),--all,)
+	$(PYTHON) -m vinyl_labels fetch $(if $(full),--all,)
 
 beatport:
-	$(PYTHON) enrich_beatport.py $(n) $(if $(full),--all,)
+	$(PYTHON) -m vinyl_labels beatport $(n) $(if $(full),--all,)
 
 bandcamp:
-	$(PYTHON) enrich_bandcamp.py $(if $(full),--all,)
+	$(PYTHON) -m vinyl_labels bandcamp $(if $(full),--all,)
 
 spotify:
-	$(PYTHON) enrich_spotify.py $(if $(full),--all,)
+	$(PYTHON) -m vinyl_labels spotify $(if $(full),--all,)
 
 analyze:
-	$(PYTHON) analyze_bpm.py $(n) $(if $(full),--all,) $(if $(pace),--pace $(pace),)
+	$(PYTHON) -m vinyl_labels analyze $(n) $(if $(full),--all,) $(if $(pace),--pace $(pace),)
 
 audit:
-	$(PYTHON) audit_bpm.py $(n)
+	$(PYTHON) -m vinyl_labels audit $(n)
 
 edit:
-	$(PYTHON) edit_bpm.py
+	$(PYTHON) -m vinyl_labels edit
 
 # (fallback: the old CSV workflow still works with export/import)
 export:
-	$(PYTHON) bpm_manual.py export
+	$(PYTHON) -m vinyl_labels export
 
 import:
-	$(PYTHON) bpm_manual.py import
+	$(PYTHON) -m vinyl_labels import
 
 render:
-	$(PYTHON) render_labels.py $(d) $(if $(full),--all,)
+	$(PYTHON) -m vinyl_labels render $(d) $(if $(full),--all,)
 
 view:
-	$(PYTHON) render_labels.py $(d) --view $(if $(full),--all,)
+	$(PYTHON) -m vinyl_labels render $(d) --view $(if $(full),--all,)
 
-test: render
-	$(PYTHON) print_labels.py $(d) --test
+print-test: render
+	$(PYTHON) -m vinyl_labels print $(d) --test
+
+# Backwards-compatible alias: historically `make test` meant a printer dry run.
+test: print-test
+
+check:
+	$(PYTHON) -m vinyl_labels check
+
+backup:
+	$(PYTHON) -m vinyl_labels backup
 
 print: render
-	$(PYTHON) print_labels.py $(d) $(if $(batch),--batch,)
+	$(PYTHON) -m vinyl_labels print $(d) $(if $(batch),--batch,)
 
-# make todo -> runs all automatic steps at once (printing is manual)
-todo: fetch beatport bandcamp spotify render
+# Run the actual pipeline through the serial, fail-fast command orchestrator.
+todo:
+	$(PYTHON) -m vinyl_labels workflow $(if $(full),--all,) $(if $(n),--limit $(n),) $(if $(pace),--pace $(pace),)
 
 # Start the Soulseek daemon. With Docker (recommended, container named
 # "slskd") this just makes sure it's running — it stays up in the
@@ -139,10 +154,10 @@ slskd:
 #   make slskd-status  -> print the state once and exit
 #   make slskd-watch   -> watch continuously; notify + restart if it gets stuck
 slskd-status:
-	$(PYTHON) slskd_monitor.py
+	$(PYTHON) -m vinyl_labels slskd-status
 
 slskd-watch:
-	$(PYTHON) slskd_monitor.py --watch
+	$(PYTHON) -m vinyl_labels slskd-status --watch
 
 # make download          -> everything still missing
 # make download d=aphex  -> only records matching "aphex"
@@ -151,4 +166,4 @@ slskd-watch:
 # make download deep=1   -> also try a title-only search (wider, slower)
 # make download j=12     -> search 12 records at a time (default 8)
 download:
-	$(PYTHON) download_music.py $(d) $(if $(force),--force,) $(if $(retry),--retry-failed,) $(if $(deep),--deep,) $(if $(j),--parallel $(j),)
+	$(PYTHON) -m vinyl_labels download $(d) $(if $(force),--force,) $(if $(retry),--retry-failed,) $(if $(deep),--deep,) $(if $(j),--parallel $(j),)

@@ -7,13 +7,15 @@ Nothing here is meant to be run directly.
 import difflib
 import re
 import unicodedata
-from pathlib import Path
+from io import BytesIO
 
 import requests
+from PIL import Image, ImageOps
 
-import config
+from . import config
+from .paths import project_path
 
-COVERS_DIR = Path(__file__).parent / config.COVERS_DIR
+COVERS_DIR = project_path(config.COVERS_DIR)
 
 
 def ascii_fold(text):
@@ -91,11 +93,20 @@ def download_cover(url, release_id):
         resp = requests.get(url, headers={"User-Agent": config.DISCOGS_USER_AGENT}, timeout=20)
         if resp.status_code != 200 or not resp.content:
             return None
-    except requests.RequestException:
+        with Image.open(BytesIO(resp.content)) as image:
+            image.load()
+            cover = ImageOps.exif_transpose(image).convert("RGB")
+    except (OSError, ValueError, requests.RequestException):
         return None
-    COVERS_DIR.mkdir(exist_ok=True)
+    COVERS_DIR.mkdir(parents=True, exist_ok=True)
     dest = COVERS_DIR / f"{release_id}.jpg"
-    dest.write_bytes(resp.content)
+    temporary = dest.with_name(f".{dest.name}.tmp")
+    try:
+        cover.save(temporary, format="JPEG", quality=92, optimize=True)
+        temporary.replace(dest)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        return None
     return f"{config.COVERS_DIR}/{release_id}.jpg"
 
 
