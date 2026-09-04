@@ -90,6 +90,122 @@ class SearchOutcomeTests(unittest.TestCase):
         ):
             enrich_spotify.search_album_spotify({}, "Artist", "Release")
 
+    def test_spotify_track_search_uses_market_and_returns_exact_match(self):
+        candidate = {
+            "id": "spotify-track",
+            "name": "The Track",
+            "artists": [{"name": "The Artist"}],
+            "album": {"name": "Another Release"},
+            "duration_ms": 245_400,
+            "external_ids": {"isrc": "GB-AAA-26-00001"},
+        }
+        with (
+            patch.object(enrich_spotify.config, "SPOTIFY_MARKET", "ES"),
+            patch.object(
+                enrich_spotify.requests,
+                "get",
+                return_value=Response({"tracks": {"items": [candidate]}}),
+            ) as request,
+        ):
+            result = enrich_spotify.search_track_spotify(
+                {}, "The Artist", "The Track", "Original EP"
+            )
+
+        self.assertEqual(result["duration_seconds"], 245)
+        self.assertEqual(result["isrc"], "GB-AAA-26-00001")
+        self.assertEqual(request.call_args.kwargs["params"]["market"], "ES")
+        self.assertEqual(request.call_args.kwargs["params"]["type"], "track")
+        self.assertEqual(
+            request.call_args.kwargs["params"]["q"],
+            "track:The Track artist:The Artist",
+        )
+
+    def test_spotify_track_search_does_not_confuse_remixes(self):
+        candidate = {
+            "id": "wrong-version",
+            "name": "The Track (Radio Edit)",
+            "artists": [{"name": "The Artist"}],
+            "album": {"name": "The Track"},
+            "duration_ms": 180_000,
+            "external_ids": {},
+        }
+        with patch.object(
+            enrich_spotify.requests,
+            "get",
+            return_value=Response({"tracks": {"items": [candidate]}}),
+        ):
+            result = enrich_spotify.search_track_spotify(
+                {}, "The Artist", "The Track", "Original EP"
+            )
+        self.assertIsNone(result)
+
+    def test_spotify_track_selection_rejects_ambiguous_versions(self):
+        candidates = [
+            {
+                "id": "short",
+                "title": "The Track",
+                "artists": ["The Artist"],
+                "album": "Compilation One",
+                "duration_seconds": 180,
+                "isrc": None,
+            },
+            {
+                "id": "long",
+                "title": "The Track",
+                "artists": ["The Artist"],
+                "album": "Compilation Two",
+                "duration_seconds": 360,
+                "isrc": None,
+            },
+        ]
+        self.assertIsNone(
+            enrich_spotify.choose_spotify_track(
+                candidates, "The Artist", "The Track", "Original EP"
+            )
+        )
+
+    def test_spotify_track_selection_prefers_the_matching_release(self):
+        candidates = [
+            {
+                "id": "compilation",
+                "title": "The Track",
+                "artists": ["The Artist"],
+                "album": "Compilation",
+                "duration_seconds": 180,
+                "isrc": None,
+            },
+            {
+                "id": "release",
+                "title": "The Track",
+                "artists": ["The Artist"],
+                "album": "Original EP",
+                "duration_seconds": 360,
+                "isrc": None,
+            },
+        ]
+        result = enrich_spotify.choose_spotify_track(
+            candidates, "The Artist", "The Track", "Original EP"
+        )
+        self.assertEqual(result["id"], "release")
+
+    def test_spotify_track_selection_accepts_an_exact_isrc_despite_title_formatting(self):
+        candidate = {
+            "id": "isrc-match",
+            "title": "The Track - Remastered",
+            "artists": ["Different Display Name"],
+            "album": "Different Release",
+            "duration_seconds": 245,
+            "isrc": "GB-AAA-26-00001",
+        }
+        result = enrich_spotify.choose_spotify_track(
+            [candidate],
+            "The Artist",
+            "The Track",
+            "Original EP",
+            "GBAAA2600001",
+        )
+        self.assertEqual(result["id"], "isrc-match")
+
 
 def create_database(path):
     conn = sqlite3.connect(path)
@@ -215,6 +331,7 @@ class WorkflowFailureTests(unittest.TestCase):
                         ),
                         patch.object(module, "get_spotify_token", return_value="token"),
                         search_patch,
+                        patch.object(module, "search_track_spotify", return_value=None),
                     ]
                 )
 
@@ -255,7 +372,7 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertEqual(steps, ["beatport"])
         self.assertEqual(misses, [("beatport", None)])
 
-    def test_beatport_preserves_a_differing_verified_key(self):
+    def test_beatport_replaces_a_differing_verified_audio_key(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "library.db"
             create_database(path)
@@ -301,7 +418,7 @@ class WorkflowFailureTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(
             (track["key"], track["key_source"], track["key_verified"]),
-            ("Am", "audio", 1),
+            ("Cm", "beatport", 1),
         )
         self.assertEqual(beatport["key"], "Cm")
 
@@ -330,6 +447,96 @@ class WorkflowFailureTests(unittest.TestCase):
         status, steps, _misses = self.run_with_database(enrich_spotify, None)
         self.assertEqual(status, 0)
         self.assertEqual(steps, ["spotify"])
+
+    def test_spotify_album_miss_falls_back_only_for_missing_track_durations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "library.db"
+            create_database(path)
+            conn = sqlite3.connect(path)
+            conn.execute(
+                "INSERT INTO tracks"
+                " (id, release_id, sort_order, title, duration_display)"
+                " VALUES (20, 1, 2, 'Already Timed', '4:00')"
+            )
+            conn.commit()
+            conn.close()
+
+            match = {
+                "id": "spotify-track",
+                "title": "Track",
+                "artists": ["Artist"],
+                "album": "Compilation",
+                "duration_seconds": 245,
+                "isrc": "GB-AAA-26-00001",
+            }
+            with (
+                patch.object(enrich_spotify, "init_db"),
+                patch.object(
+                    enrich_spotify,
+                    "get_connection",
+                    side_effect=lambda: connect(path),
+                ),
+                patch.object(enrich_spotify.config, "SPOTIFY_CLIENT_ID", "client"),
+                patch.object(enrich_spotify.config, "SPOTIFY_CLIENT_SECRET", "secret"),
+                patch.object(enrich_spotify, "get_spotify_token", return_value="token"),
+                patch.object(enrich_spotify, "search_album_spotify", return_value=None),
+                patch.object(
+                    enrich_spotify, "search_track_spotify", return_value=match
+                ) as track_search,
+                patch.object(enrich_spotify.time, "sleep"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = enrich_spotify.main([])
+
+            conn = connect(path)
+            tracks = {
+                row["id"]: (row["duration_display"], row["isrc"])
+                for row in conn.execute(
+                    "SELECT id, duration_display, isrc FROM tracks ORDER BY id"
+                )
+            }
+            steps = [row["step"] for row in conn.execute("SELECT step FROM workflow_steps")]
+            conn.close()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(tracks[10], ("4:05", "GB-AAA-26-00001"))
+        self.assertEqual(tracks[20], ("4:00", None))
+        self.assertEqual(steps, ["spotify"])
+        track_search.assert_called_once_with(
+            {"Authorization": "Bearer token"}, "Artist", "Track", "Release", None
+        )
+
+    def test_spotify_track_search_failure_keeps_release_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "library.db"
+            create_database(path)
+            with (
+                patch.object(enrich_spotify, "init_db"),
+                patch.object(
+                    enrich_spotify,
+                    "get_connection",
+                    side_effect=lambda: connect(path),
+                ),
+                patch.object(enrich_spotify.config, "SPOTIFY_CLIENT_ID", "client"),
+                patch.object(enrich_spotify.config, "SPOTIFY_CLIENT_SECRET", "secret"),
+                patch.object(enrich_spotify, "get_spotify_token", return_value="token"),
+                patch.object(enrich_spotify, "search_album_spotify", return_value=None),
+                patch.object(
+                    enrich_spotify,
+                    "search_track_spotify",
+                    side_effect=enrich_spotify.SpotifyError("temporary outage"),
+                ),
+                patch.object(enrich_spotify.time, "sleep"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = enrich_spotify.main([])
+
+            conn = connect(path)
+            steps = list(conn.execute("SELECT * FROM workflow_steps"))
+            conn.close()
+
+        self.assertEqual(status, 1)
+        self.assertEqual(steps, [])
 
     def test_missing_spotify_credentials_are_an_optional_clean_skip(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -258,6 +258,22 @@ def main(arguments=None):
         " )"
     )
     previously_confirmed = cursor.rowcount
+
+    # Apply the same precedence to rows populated by older versions: an
+    # available Beatport key wins over automatic audio analysis. A key typed
+    # manually remains an intentional user override.
+    cursor.execute(
+        "UPDATE tracks SET"
+        " key = (SELECT key FROM key_sources"
+        "        WHERE track_id = tracks.id AND source = 'beatport'),"
+        " key_source = 'beatport', key_verified = 1,"
+        " key_needs_review = 0, key_alt = NULL, key_strength = NULL"
+        " WHERE COALESCE(key_source, '') <> 'manual' AND EXISTS ("
+        "     SELECT 1 FROM key_sources"
+        "     WHERE track_id = tracks.id AND source = 'beatport' AND key IS NOT NULL"
+        " )"
+    )
+    previously_preferred_keys = cursor.rowcount
     conn.commit()
 
     candidate_releases = {
@@ -309,6 +325,8 @@ def main(arguments=None):
         conn.close()
         if previously_confirmed:
             print(f"Auto-confirmed {previously_confirmed} existing Beatport BPMs.")
+        if previously_preferred_keys:
+            print(f"Selected {previously_preferred_keys} existing Beatport keys.")
         print("Nothing new to check. Use --all to revisit the whole collection.")
         return 0
     print("Connecting to Beatport (anonymous token from embedded player)...")
@@ -457,10 +475,6 @@ def main(arguments=None):
                     (row["id"],),
                 )
                 updates.append("Beatport confirms key")
-            elif row["key_verified"]:
-                updates.append(
-                    f"Beatport key {key} (keeping your confirmed {row['key']})"
-                )
             else:
                 cursor.execute(
                     "UPDATE tracks SET key = ?, key_source = 'beatport', key_alt = NULL,"

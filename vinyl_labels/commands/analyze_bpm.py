@@ -141,6 +141,7 @@ class AudioAnalysis:
     bpm_alt: float | None = None
     bpm_doubtful: bool = False
     key: str | None = None
+    key_source: str | None = None
     key_alt: str | None = None
     key_doubtful: bool = False
     key_strength: float | None = None
@@ -474,7 +475,7 @@ def measure_key_librosa(audio_path):
 
 
 def measure_key(audio_path):
-    """Runs both global-key detectors and applies the consensus policy."""
+    """Runs both key detectors, preferring Essentia over librosa."""
     key_es, strength_es = measure_key_essentia(audio_path)
     key_lr, strength_lr = measure_key_librosa(audio_path)
     estimates = []
@@ -505,6 +506,18 @@ def measure_audio(audio_path, video_duration, *, need_bpm=True, need_key=True):
     if need_key:
         key, key_alt, key_doubtful, key_strength, estimates = measure_key(audio_path)
         result.key = key
+        # ``measure_key`` returns Essentia's estimate whenever it is available,
+        # with librosa as the fallback. Persist that exact detector rather than
+        # the old generic ``audio`` label so the chosen-key precedence remains
+        # explicit in the database and editor.
+        result.key_source = next(
+            (
+                source
+                for source in ("essentia", "librosa")
+                if any(e.source == source and e.key == key for e in estimates)
+            ),
+            None,
+        )
         result.key_alt = key_alt
         result.key_doubtful = key_doubtful
         result.key_strength = key_strength
@@ -780,11 +793,12 @@ def main(arguments=None):
 
             if need_key and result.key is not None:
                 cursor.execute(
-                    "UPDATE tracks SET key = ?, key_source = 'audio', key_alt = ?,"
+                    "UPDATE tracks SET key = ?, key_source = ?, key_alt = ?,"
                     " key_needs_review = ?, key_verified = ?, key_strength = ?"
                     " WHERE id = ?",
                     (
                         result.key,
+                        result.key_source or "audio",
                         result.key_alt,
                         int(result.key_doubtful),
                         int(not result.key_doubtful),

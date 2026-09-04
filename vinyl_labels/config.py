@@ -24,6 +24,9 @@ DISCOGS_USER_TOKEN = os.environ.get("DISCOGS_USER_TOKEN", "")
 # Note: new Spotify apps do NOT have BPM access (audio-features blocked since Nov 2024).
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
+# Client-credentials tokens have no user country. Spotify needs an explicit
+# market to return only catalog entries that are available to this installation.
+SPOTIFY_MARKET = os.environ.get("SPOTIFY_MARKET", "ES").strip().upper() or "ES"
 
 # OPTIONAL. Soulseek download (download_music.py), via a local slskd
 # daemon. See the README section "Download digital copies (Soulseek)".
@@ -56,6 +59,11 @@ PRINTER_BACKEND = "pyusb"
 #   "usb://0x04f9:0x209b/000A1Z123456"
 PRINTER_IDENTIFIER = None
 
+# Installed 62mm continuous roll. DK-22205 is black on white; DK-2251 is
+# black/red on white and requires a different raster mode even for black-only
+# artwork. The printer status packet cannot distinguish these two rolls.
+PRINTER_ROLL = "DK-22205"
+
 # =========================================================
 # 3) BPM ANALYSIS (analyze_bpm.py)
 # =========================================================
@@ -71,9 +79,8 @@ YOUTUBE_COOKIES_BROWSER = ""
 # =========================================================
 # 4) LABELS
 # =========================================================
-# Brother QL printers print on continuous 62mm wide rolls. This project sends
-# jobs in the two-color mode required by the DK-2251 black/red-on-white roll.
-# Do NOT change this unless you buy a different type of roll.
+# Brother QL printers print on continuous 62mm wide rolls. PRINTER_ROLL above
+# selects the matching monochrome or two-color raster mode.
 LABEL_WIDTH_MM = 62
 LABEL_WIDTH_PX = 696  # printable width in pixels at 300dpi (fixed)
 

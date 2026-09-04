@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from PIL import Image
+
 from vinyl_labels.commands import print_labels, render_labels
 from vinyl_labels.commands.render_labels import (
     archive_orphaned_pending,
@@ -231,6 +233,54 @@ class PrintableValidationTests(unittest.TestCase):
 
         self.assertEqual(printable, [])
         self.assertCountEqual(blocked, [first, duplicate])
+
+
+class PrintProtocolTests(unittest.TestCase):
+    def test_current_roll_uses_monochrome_raster_mode(self):
+        with mock.patch.object(print_labels.config, "PRINTER_ROLL", "DK-22205"):
+            roll = print_labels.configured_roll()
+
+        self.assertEqual(roll["label"], "62")
+        self.assertFalse(roll["red"])
+
+    def test_black_red_roll_uses_two_color_raster_mode(self):
+        with mock.patch.object(print_labels.config, "PRINTER_ROLL", "DK-2251"):
+            roll = print_labels.configured_roll()
+
+        self.assertEqual(roll["label"], "62red")
+        self.assertTrue(roll["red"])
+
+    def test_ready_render_is_rotated_and_fitted_to_portrait_layout(self):
+        image = Image.new("RGB", (696, 424), "white")
+
+        prepared = print_labels.prepare_for_print(image)
+
+        self.assertEqual(prepared.size, (696, 1142))
+        self.assertEqual(print_labels.estimated_length_mm(image), 100)
+
+    def test_no_status_request_is_sent_after_nonblocking_print_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            pending = output / "Artist - Record (1).png"
+            Image.new("RGB", (696, 150), "white").save(pending)
+
+            with (
+                mock.patch.object(print_labels, "OUTPUT_DIR", output),
+                mock.patch.object(print_labels, "PRINTED_DIR", output / "printed"),
+                mock.patch.object(
+                    print_labels, "validated_images", return_value=([pending], [])
+                ),
+                mock.patch.object(print_labels, "find_printer", return_value="usb://printer"),
+                mock.patch.object(print_labels, "show_preflight", return_value=True),
+                mock.patch.object(print_labels, "send", return_value={"outcome": "sent"}),
+                mock.patch.object(print_labels, "read_printer_status") as read_status,
+                mock.patch.object(print_labels.time, "sleep"),
+                mock.patch("builtins.input", side_effect=["y", "q"]),
+            ):
+                result = print_labels.main([])
+
+            self.assertEqual(result, 0)
+            read_status.assert_not_called()
 
 
 if __name__ == "__main__":

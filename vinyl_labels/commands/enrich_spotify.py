@@ -17,22 +17,33 @@ How to run it:
     python -m vinyl_labels spotify          # newly imported records only
     python -m vinyl_labels spotify --all    # retry the whole collection
 
+The release is matched first because it is the safest identity check. Any track
+whose duration is still missing then gets a strict track-level search, allowing
+Spotify singles and compilation appearances to fill gaps without requiring the
+whole EP to exist there.
+
 Normal runs skip records already attempted, including old misses. Use --all
 when you want to try incomplete records again.
 """
 
 import argparse
+import re
 import time
 
 import requests
 
 from vinyl_labels import config
-from vinyl_labels.common import download_cover, looks_similar
+from vinyl_labels.common import download_cover, format_duration, looks_similar, normalize
 from vinyl_labels.db import get_connection, init_db, mark_workflow_step
 from vinyl_labels.paths import PROJECT_ROOT
 
 SPOTIFY_ACCOUNTS = "https://accounts.spotify.com/api/token"
 SPOTIFY_API = "https://api.spotify.com/v1"
+TRACK_SEARCH_LIMIT = 10
+AMBIGUOUS_DURATION_SECONDS = 2
+
+PLACEHOLDER_ARTISTS = {"", "unknown", "various", "variousartists"}
+GENERIC_VERSION_SUFFIXES = ("originalmix", "originalversion")
 
 
 class SpotifyError(RuntimeError):
@@ -80,7 +91,12 @@ def search_album_spotify(headers, artist, title):
     try:
         resp = requests.get(
             f"{SPOTIFY_API}/search",
-            params={"q": query, "type": "album", "limit": 5},
+            params={
+                "q": query,
+                "type": "album",
+                "market": config.SPOTIFY_MARKET,
+                "limit": 5,
+            },
             headers=headers,
             timeout=15,
         )
@@ -116,12 +132,161 @@ def search_album_spotify(headers, artist, title):
     return None
 
 
+def _comparable_track_title(title):
+    """Normalize a title without erasing meaningful remix/edit information."""
+    value = normalize(title)
+    for suffix in GENERIC_VERSION_SUFFIXES:
+        if value.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
+def _track_titles_match(left, right):
+    left = _comparable_track_title(left)
+    right = _comparable_track_title(right)
+    return bool(left and right and left == right)
+
+
+def _credited_artists(artist):
+    return [
+        name.strip()
+        for name in re.split(r"\s*(?:/|&|,|\bfeat\.?\b|\bfeaturing\b)\s*", artist or "")
+        if normalize(name) not in PLACEHOLDER_ARTISTS
+    ]
+
+
+def _artists_match(expected, candidate_names):
+    expected_names = {normalize(name) for name in _credited_artists(expected)}
+    if not expected_names:
+        return False
+    actual_names = {normalize(name) for name in candidate_names if normalize(name)}
+    return bool(expected_names & actual_names)
+
+
+def _spotify_track(item):
+    """Validate and reduce a Spotify TrackObject to fields used by this command."""
+    if not isinstance(item, dict) or not item.get("id"):
+        raise SpotifyError("Spotify returned an invalid track result")
+    title = item.get("name")
+    artists = item.get("artists") or []
+    album = item.get("album") or {}
+    if (
+        not isinstance(title, str)
+        or not isinstance(artists, list)
+        or any(not isinstance(a, dict) or not isinstance(a.get("name"), str) for a in artists)
+        or not isinstance(album, dict)
+    ):
+        raise SpotifyError("Spotify returned invalid track metadata")
+    duration_ms = item.get("duration_ms") or 0
+    if not isinstance(duration_ms, (int, float)) or duration_ms < 0:
+        raise SpotifyError("Spotify returned an invalid track duration")
+    external_ids = item.get("external_ids") or {}
+    if not isinstance(external_ids, dict):
+        raise SpotifyError("Spotify returned invalid track identifiers")
+    return {
+        "id": item["id"],
+        "title": title,
+        "artists": [a["name"] for a in artists],
+        "album": album.get("name") if isinstance(album.get("name"), str) else "",
+        "duration_seconds": round(duration_ms / 1000) if duration_ms else 0,
+        "isrc": external_ids.get("isrc"),
+    }
+
+
+def choose_spotify_track(
+    candidates,
+    artist,
+    title,
+    release_title="",
+    isrc=None,
+    *,
+    release_already_matched=False,
+):
+    """Return one unambiguous recording, or None rather than guess.
+
+    Exact ISRC wins when one is already known. Otherwise title and credited
+    artist must match exactly after punctuation folding. A matching release is
+    preferred; duplicate Spotify appearances are accepted only when their
+    durations agree within two seconds.
+    """
+    normalized_isrc = normalize(isrc)
+    viable = []
+    for candidate in candidates:
+        if normalized_isrc:
+            if normalize(candidate.get("isrc")) == normalized_isrc:
+                viable.append(candidate)
+            continue
+        if not _track_titles_match(candidate["title"], title):
+            continue
+        if not release_already_matched and not _artists_match(artist, candidate["artists"]):
+            continue
+        viable.append(candidate)
+
+    if not viable:
+        return None
+    if normalized_isrc:
+        return viable[0]
+
+    release_matches = [
+        candidate
+        for candidate in viable
+        if release_title
+        and candidate.get("album")
+        and looks_similar(candidate["album"], release_title, threshold=0.85)
+    ]
+    if release_matches:
+        viable = release_matches
+    if len(viable) == 1:
+        return viable[0]
+
+    durations = [candidate["duration_seconds"] for candidate in viable if candidate["duration_seconds"]]
+    if durations and max(durations) - min(durations) <= AMBIGUOUS_DURATION_SECONDS:
+        return viable[0]
+    return None
+
+
+def search_track_spotify(headers, artist, title, release_title="", isrc=None):
+    """Search one recording and return a strict, unambiguous Spotify match."""
+    credited_artists = _credited_artists(artist)
+    primary_artist = credited_artists[0] if credited_artists else ""
+    if not isrc and not primary_artist:
+        return None
+    query = f"isrc:{isrc}" if isrc else f"track:{title} artist:{primary_artist}"
+    try:
+        resp = requests.get(
+            f"{SPOTIFY_API}/search",
+            params={
+                "q": query,
+                "type": "track",
+                "market": config.SPOTIFY_MARKET,
+                "limit": TRACK_SEARCH_LIMIT,
+            },
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("tracks", {}).get("items") or []
+        if not isinstance(items, list):
+            raise TypeError("track items is not a list")
+        candidates = [_spotify_track(item) for item in items]
+    except requests.RequestException as error:
+        raise SpotifyError(f"Spotify track search failed: {error}") from error
+    except (ValueError, TypeError, AttributeError) as error:
+        raise SpotifyError("Spotify returned an invalid track search response") from error
+    return choose_spotify_track(candidates, artist, title, release_title, isrc)
+
+
 def tracks_from_spotify_album(headers, album_id):
     """Fetches album tracks with duration and ISRC. The endpoint for
     multiple tracks at once (/tracks?ids=...) is blocked for new apps,
     so we have to request them one by one."""
     try:
-        resp = requests.get(f"{SPOTIFY_API}/albums/{album_id}", headers=headers, timeout=15)
+        resp = requests.get(
+            f"{SPOTIFY_API}/albums/{album_id}",
+            params={"market": config.SPOTIFY_MARKET},
+            headers=headers,
+            timeout=15,
+        )
         resp.raise_for_status()
         items = resp.json().get("tracks", {}).get("items") or []
         if not isinstance(items, list):
@@ -136,7 +301,12 @@ def tracks_from_spotify_album(headers, album_id):
         if not isinstance(item, dict) or not item.get("id"):
             raise SpotifyError("Spotify returned an invalid track result")
         try:
-            resp = requests.get(f"{SPOTIFY_API}/tracks/{item['id']}", headers=headers, timeout=15)
+            resp = requests.get(
+                f"{SPOTIFY_API}/tracks/{item['id']}",
+                params={"market": config.SPOTIFY_MARKET},
+                headers=headers,
+                timeout=15,
+            )
             resp.raise_for_status()
             t = resp.json()
             if not isinstance(t, dict):
@@ -145,14 +315,7 @@ def tracks_from_spotify_album(headers, album_id):
             raise SpotifyError(f"Spotify track request failed: {error}") from error
         except (ValueError, TypeError, AttributeError) as error:
             raise SpotifyError("Spotify returned invalid track metadata") from error
-        seconds = (t.get("duration_ms") or 0) // 1000
-        tracks.append(
-            {
-                "title": t.get("name") or "",
-                "duration": f"{seconds // 60}:{seconds % 60:02d}" if seconds else "",
-                "isrc": (t.get("external_ids") or {}).get("isrc"),
-            }
-        )
+        tracks.append(_spotify_track(t))
         time.sleep(0.2)
     return tracks
 
@@ -197,7 +360,13 @@ def main(arguments=None):
         return 1
     headers = {"Authorization": f"Bearer {token}"}
 
-    stats = {"covers": 0, "durations": 0, "isrc": 0, "no_spotify": 0}
+    stats = {
+        "covers": 0,
+        "durations": 0,
+        "isrc": 0,
+        "no_album": 0,
+        "track_matches": 0,
+    }
     provider_failed = False
     for i, release in enumerate(releases, start=1):
         rid = release["release_id"]
@@ -248,13 +417,21 @@ def main(arguments=None):
                     spotify_tracks = []
                 durations = isrcs = 0
                 for t in tracks_db:
-                    match = next((s for s in spotify_tracks if looks_similar(s["title"], t["title"])), None)
+                    track_artist = t["artist"] or release["artist"]
+                    match = choose_spotify_track(
+                        spotify_tracks,
+                        track_artist,
+                        t["title"],
+                        release["title"],
+                        t["isrc"],
+                        release_already_matched=True,
+                    )
                     if not match:
                         continue
-                    if not t["duration_display"] and match["duration"]:
+                    if not t["duration_display"] and match["duration_seconds"]:
                         cursor.execute(
                             "UPDATE tracks SET duration_display = ? WHERE id = ?",
-                            (match["duration"], t["id"]),
+                            (format_duration(match["duration_seconds"]), t["id"]),
                         )
                         durations += 1
                     if not t["isrc"] and match["isrc"]:
@@ -267,8 +444,54 @@ def main(arguments=None):
                 if isrcs:
                     updates.append(f"{isrcs} ISRCs")
         else:
-            stats["no_spotify"] += 1
-            updates.append("not on Spotify")
+            stats["no_album"] += 1
+            updates.append("album not on Spotify")
+
+        # The EP/album may not be on Spotify even when individual tracks are
+        # available as singles or on compilations. Search only durations that
+        # remain unresolved; never replace Discogs or Bandcamp data.
+        unresolved = cursor.execute(
+            "SELECT * FROM tracks WHERE release_id = ?"
+            " AND (duration_display IS NULL OR TRIM(duration_display) = '')"
+            " ORDER BY sort_order, id",
+            (rid,),
+        ).fetchall()
+        release_track_matches = 0
+        for track in unresolved:
+            track_artist = track["artist"] or release["artist"]
+            try:
+                match = search_track_spotify(
+                    headers,
+                    track_artist,
+                    track["title"],
+                    release["title"],
+                    track["isrc"],
+                )
+            except SpotifyError as error:
+                provider_failed = True
+                release_failed = True
+                updates.append(f"track search failed: {error} (will retry)")
+                break
+            if match and match["duration_seconds"]:
+                cursor.execute(
+                    "UPDATE tracks SET duration_display = ?,"
+                    " isrc = CASE WHEN isrc IS NULL OR TRIM(isrc) = ''"
+                    " THEN ? ELSE isrc END WHERE id = ?",
+                    (
+                        format_duration(match["duration_seconds"]),
+                        match["isrc"],
+                        track["id"],
+                    ),
+                )
+                stats["durations"] += 1
+                stats["track_matches"] += 1
+                release_track_matches += 1
+                if not track["isrc"] and match["isrc"]:
+                    stats["isrc"] += 1
+            time.sleep(0.2)
+
+        if release_track_matches:
+            updates.append(f"{release_track_matches} durations from track search")
 
         if not release_failed:
             mark_workflow_step(conn, rid, "spotify")
@@ -283,8 +506,10 @@ def main(arguments=None):
         f"Covers downloaded: {stats['covers']} | durations completed: {stats['durations']} | "
         f"ISRCs saved: {stats['isrc']}"
     )
-    if stats["no_spotify"]:
-        print(f"Records not on Spotify: {stats['no_spotify']} (normal with niche vinyl).")
+    if stats["track_matches"]:
+        print(f"Durations found by individual track search: {stats['track_matches']}.")
+    if stats["no_album"]:
+        print(f"Records without a Spotify album match: {stats['no_album']} (individual tracks checked).")
     print("Next step: python -m vinyl_labels analyze  (if BPMs are pending)")
     print("        or: python -m vinyl_labels render")
     return 1 if provider_failed else 0

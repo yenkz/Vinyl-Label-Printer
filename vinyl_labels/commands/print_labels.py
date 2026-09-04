@@ -5,9 +5,11 @@ Takes the images in labels_output/ and sends them to print, one by one,
 to your Brother QL printer connected via USB.
 
 The print setup follows the Brother P-touch template
-"Fantastic Man - The Axis of People.lbx": 62mm black/red continuous media,
-artwork rotated 270 degrees, fitted to the 696-dot printable width,
-error-diffusion monochrome artwork, and automatic cutting.
+"Fantastic Man - The Axis of People.lbx": 62mm continuous media, artwork
+rotated 270 degrees and fitted to the 696-dot printable width, error-diffusion
+monochrome artwork, and automatic cutting. Both DK-22205 monochrome and
+DK-2251 black/red rolls are supported; ``config.PRINTER_ROLL`` must match the
+installed roll.
 
 After each USB job, you must confirm that the physical label printed and cut
 completely. Only then is it moved to labels_output/printed/, so next time only
@@ -53,38 +55,59 @@ from .render_labels import file_name, release_id_from_path, unique_artifact_path
 OUTPUT_DIR = project_path(config.OUTPUT_DIR)
 PRINTED_DIR = OUTPUT_DIR / "printed"
 
-# Settings copied from "Fantastic Man - The Axis of People.lbx". For the 62mm
-# endless roll, brother_ql scales the rotated image to 696 printable dots and
-# supplies its standard 35-dot feed margin (about 3mm).
+# Settings copied from "Fantastic Man - The Axis of People.lbx". Rotate the
+# landscape artwork into portrait orientation, fit it across the roll, and let
+# brother_ql add the standard 35-dot feed margin (about 3mm).
 PRINT_ROTATION = 270
 PRINTABLE_WIDTH_PX = 696
 FEED_MARGIN_PX = 35
-TWO_COLOR_PRINT_SPEED_MM_S = 24
 CUT_SETTLE_SECONDS = 1.0
 EXPECTED_MEDIA_WIDTH_MM = 62
 EXPECTED_MEDIA_TYPE = "Continuous length tape"
 EXPECTED_MEDIA_CATEGORY = "DK"
-PRINT_LABEL = "62red"
-PRINT_ROLL = "DK-2251 black/red on white"
+ROLL_SETTINGS = {
+    "DK-22205": {
+        "label": "62",
+        "red": False,
+        "description": "DK-22205 black on white",
+        "speed_mm_s": 148,
+    },
+    "DK-2251": {
+        "label": "62red",
+        "red": True,
+        "description": "DK-2251 black/red on white",
+        "speed_mm_s": 24,
+    },
+}
+
+
+def configured_roll():
+    """Return raster settings for the explicitly configured physical roll."""
+    try:
+        return ROLL_SETTINGS[config.PRINTER_ROLL]
+    except KeyError as error:
+        supported = ", ".join(ROLL_SETTINGS)
+        raise ValueError(
+            f"Unsupported PRINTER_ROLL {config.PRINTER_ROLL!r}; choose {supported}."
+        ) from error
 
 def estimated_length_mm(img):
-    """Physical roll length after the template's rotation and width fitting."""
+    """Physical roll length after rotating and fitting the artwork."""
     rotated_width, rotated_height = img.height, img.width
     scaled_height = round(rotated_height * PRINTABLE_WIDTH_PX / rotated_width)
     return round((scaled_height + FEED_MARGIN_PX) / 11.81)
 
 
 def print_wait_seconds(length_mm):
-    """Conservative time for DK-2251 two-color printing plus its cut."""
-    return length_mm / TWO_COLOR_PRINT_SPEED_MM_S + CUT_SETTLE_SECONDS
+    """Conservative time for the configured roll's printing plus its cut."""
+    return length_mm / configured_roll()["speed_mm_s"] + CUT_SETTLE_SECONDS
 
 
 def prepare_for_print(img):
-    """Applies the LBX rotation, width fit, and error diffusion.
+    """Applies the LBX portrait rotation, width fit, and error diffusion.
 
-    DK-2251 must be sent as a two-color job even though this artwork only uses
-    black. Dither explicitly first because brother_ql's two-color conversion
-    does not apply its ``dither`` option.
+    Dither explicitly first so monochrome and two-color conversion produce the
+    same black artwork; brother_ql ignores its ``dither`` option in red mode.
     """
     prepared = img.rotate(PRINT_ROTATION, expand=True)
     if prepared.width != PRINTABLE_WIDTH_PX:
@@ -224,9 +247,10 @@ def printer_preflight_problems(status):
         or status.get("media_width") != EXPECTED_MEDIA_WIDTH_MM
         or status.get("media_length") != 0
     ):
+        roll = configured_roll()["description"]
         problems.append(
             f"Wrong roll: this job requires a 62mm continuous DK roll "
-            f"({PRINT_ROLL}), but the printer reports {media_description(status)}."
+            f"({roll}), but the printer reports {media_description(status)}."
         )
     return problems
 
@@ -253,9 +277,10 @@ def show_preflight(printer_identifier):
         )
         return False
 
+    roll = configured_roll()["description"]
     print(
         f"Printer ready: {status.get('model', config.PRINTER_MODEL)}, "
-        f"{media_description(status)}; using {PRINT_ROLL} mode.\n"
+        f"{media_description(status)}; using {roll} mode.\n"
     )
     return True
 
@@ -365,7 +390,7 @@ def main(arguments=None):
         try:
             with Image.open(path) as img:
                 img.load()
-                # Estimate after applying the same 270-degree rotation, width
+                # Estimate after applying the same portrait rotation, width
                 # fit, and feed margin used for the real print below.
                 length_mm = estimated_length_mm(img)
                 print_img = prepare_for_print(img)
@@ -379,13 +404,14 @@ def main(arguments=None):
             # The raster object accumulates instructions, so we use
             # a new one for each label.
             qlr = BrotherQLRaster(config.PRINTER_MODEL)
+            roll = configured_roll()
             instructions = convert(
                 qlr,
                 [print_img],
-                label=PRINT_LABEL,
-                rotate=0,  # already rotated exactly like the LBX template
-                red=True,  # required for DK-2251, even for black-only artwork
-                hq=False,  # the print-quality flag is invalid in two-color mode
+                label=roll["label"],
+                rotate=0,  # rendered image is already oriented across the roll
+                red=roll["red"],
+                hq=not roll["red"],  # the quality flag is invalid in two-color mode
                 cut=True,
             )
 
@@ -410,33 +436,16 @@ def main(arguments=None):
             if batch_mode:
                 sent_paths.append(path)
 
-            # DK-2251 two-color mode is much slower than monochrome (24mm/s).
             # Waiting for the physical length plus the cut prevents a batch
             # from writing the next job while this one is still printing.
             time.sleep(print_wait_seconds(length_mm))
 
-            # A non-blocking USB write only proves that the bytes left the Mac.
-            # Ask the printer whether it rejected them (wrong roll, feed/cutter
-            # problem, open cover, etc.) before asking the user to confirm.
-            try:
-                post_send_status = read_printer_status(printer_identifier)
-            except Exception:
-                # Some macOS/libusb combinations do not return a status packet
-                # reliably after a job. Physical confirmation remains the safe
-                # fallback in that case.
-                post_send_status = None
-            if post_send_status:
-                problems = printer_preflight_problems(post_send_status)
-                if problems:
-                    operational_failed = True
-                    print("   -> The printer rejected the job:")
-                    for problem in problems:
-                        print(f"      - {problem}")
-                    print(
-                        "      Fix the roll/feed/cover, power-cycle the printer "
-                        "if the red light remains, then run make print again."
-                    )
-                    break
+            # Do not explicitly request status here. The QL-800 raster command
+            # reference forbids sending any command (including ESC i S) between
+            # transmitting print data and receiving its automatic completion
+            # status. With a non-blocking USB backend we cannot reliably consume
+            # that notification, so physical confirmation below is the safe
+            # completion signal.
 
             if batch_mode:
                 print("   Sent; continuing with the batch.")

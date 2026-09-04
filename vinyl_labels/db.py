@@ -284,7 +284,7 @@ def _migrate_database(conn):
             bpm_needs_review  INTEGER DEFAULT 0,  -- 1 = review manually in edit_bpm.py
             bpm_verified      INTEGER DEFAULT 0,  -- 1 = validated (detectors agree, audited, or confirmed by you)
             key               TEXT,     -- tonality ("Am", "F#"); displayed on label in Camelot ("8A")
-            key_source        TEXT,     -- "beatport", "manual", or NULL
+            key_source        TEXT,     -- "beatport", "essentia", "librosa", "manual", or NULL
             key_alt           TEXT,     -- alternative if local key detectors disagreed
             key_needs_review  INTEGER DEFAULT 0,
             key_verified      INTEGER DEFAULT 0,

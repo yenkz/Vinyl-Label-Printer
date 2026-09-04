@@ -46,6 +46,22 @@ class ChromaKeyTests(unittest.TestCase):
             key, alternative, doubtful, _strength, _estimates = analyze_bpm.measure_key("x")
         self.assertEqual((key, alternative, doubtful), ("Am", "C", True))
 
+    def test_librosa_is_used_only_when_essentia_is_unavailable(self):
+        with (
+            patch.object(analyze_bpm, "measure_key_essentia", return_value=(None, None)),
+            patch.object(analyze_bpm, "measure_key_librosa", return_value=("C", 0.7)),
+        ):
+            result = analyze_bpm.measure_audio("x", 180, need_bpm=False, need_key=True)
+        self.assertEqual((result.key, result.key_source), ("C", "librosa"))
+
+    def test_essentia_is_selected_ahead_of_librosa(self):
+        with (
+            patch.object(analyze_bpm, "measure_key_essentia", return_value=("Am", 0.8)),
+            patch.object(analyze_bpm, "measure_key_librosa", return_value=("C", 0.7)),
+        ):
+            result = analyze_bpm.measure_audio("x", 180, need_bpm=False, need_key=True)
+        self.assertEqual((result.key, result.key_source), ("Am", "essentia"))
+
     def test_existing_bpm_skips_bpm_detectors(self):
         with (
             patch.object(analyze_bpm, "measure_bpm") as bpm,

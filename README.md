@@ -24,8 +24,8 @@ Each track's BPM **records which source it came from**, and the editor
 Discogs and Beatport is **confirmed automatically in the database**; unmatched
 fallback measurements remain for manual review in the editor.
 
-Designed to print on a **Brother QL** with a continuous 62mm black/red-on-white
-roll (DK-2251).
+Designed to print on a **Brother QL** with a continuous 62mm roll: monochrome
+DK-22205 or black/red-on-white DK-2251.
 
 ## Which printer to buy
 
@@ -35,9 +35,10 @@ roll (DK-2251).
   slightly cheaper). If you choose it, set `PRINTER_MODEL = "QL-600"`
   in `vinyl_labels/config.py`.
 
-Both use the same DK rolls. For this project, the **continuous white 62mm roll
-(DK-2251)** is enough: each label comes out exactly as long as needed based on
-the number of tracks.
+Both use the same DK rolls. For this project, a **continuous white 62mm roll**
+is enough: DK-22205 for monochrome or DK-2251 for black/red. Set
+`PRINTER_ROLL` in `vinyl_labels/config.py` to the installed roll; each label
+comes out exactly as long as needed based on the number of tracks.
 
 > Note: these are direct thermal printers with no ink. Prints last for years but fade
 > with heat, sun, and direct contact with soft PVC sleeves. Paper/polyethylene
@@ -135,8 +136,12 @@ Notes:
   small labels, it's often the only source that has them. Bandcamp doesn't publish
   BPM or key.
 - Step 4 (Spotify, optional) is the final fallback: cover, durations, and ISRC
-  still missing. If the record isn't on Spotify — normal for niche vinyls — no
-  problem, almost everything came from earlier steps.
+  still missing. It checks the complete release first, then searches each track
+  whose duration is still blank; this catches singles and compilation appearances
+  even when the EP itself is absent. Track-level results require an exact normalized
+  title and credited artist (or an existing ISRC), and ambiguous versions are left
+  blank rather than guessed. `SPOTIFY_MARKET` in `.env` selects catalog availability
+  and defaults to `ES`.
 - Step 5 is the **audio-analysis fallback**: searches each track without BPM or key on
   Bandcamp, YouTube, or SoundCloud (in that order), verifying the duration matches
   Discogs', downloads the audio to a temp folder, measures it locally, and deletes
@@ -158,8 +163,9 @@ Notes:
   Musical key is measured over the **complete track** with Essentia's EDM-specific
   `bgate` profile and a separate librosa harmonic-chroma classifier. Exact agreement
   is accepted; disagreement or a single-detector result is highlighted for review,
-  with both candidates and detector scores visible in `make edit`. Beatport and
-  manually entered keys are never overwritten by local analysis.
+  with both candidates and detector scores visible in `make edit`. Automatic key
+  selection always uses Beatport first, then Essentia when Beatport has no key, and
+  librosa only when neither is available. Manually entered keys are never overwritten.
 - If you already had BPM measured with the old analysis version (single detector),
   run **once** `python -m vinyl_labels audit`: re-measures all old automatic BPMs, corrects
   ones that were measured wrong, and notes the re-measurement as source — everything
@@ -206,7 +212,7 @@ Notes:
   shows you what labels would print and how many centimeters of roll they'd use,
   without printing or wasting anything.
 - Printing follows the layout from `Fantastic Man - The Axis of People.lbx`:
-  62mm continuous media, 270° artwork rotation, fit to the printable width,
+  62mm continuous media, 270° portrait rotation, fit to the printable width,
   error-diffusion monochrome conversion, and an automatic cut after each label.
 - Step 8 only prints new labels. After every USB job, it asks you to confirm
   that the physical label printed and cut completely; only a confirmed label
@@ -219,8 +225,8 @@ Notes:
   To print every pending label continuously without per-label pauses, run
   `make print batch=1`. It still cuts after each label and stops on a reported
   printer fault. At the end, enter how many completed in order; only those are
-  moved into `labels_output/printed/`. Two-color DK-2251 printing is limited to
-  about 24mm/s, so a large batch can take several minutes.
+  moved into `labels_output/printed/`. DK-2251 two-color printing is slower
+  than DK-22205 monochrome printing, so a large two-color batch can take longer.
 
 ## Download digital copies (Soulseek) — optional
 
@@ -342,11 +348,15 @@ copy the selected backup to `vinyl_labels.db`.
 
 - **Status light starts blinking red when a job is sent**: the QL-800 is
   rejecting the job because it sees no roll, the wrong roll or print-color
-  mode, an open cover, or a feed/cutter/communication error. This project uses
-  the 62mm continuous DK-2251 black/red-on-white roll (not monochrome DK-22205
-  or 62 x 100mm die-cut labels). `make print` sends the required two-color
-  raster mode even though the artwork itself is black-only, checks the model
-  and installed media before sending, and prints reported hardware errors.
+  mode, an open cover, or a feed/cutter/communication error. Set `PRINTER_ROLL`
+  in `vinyl_labels/config.py` to the roll actually installed: `"DK-22205"` for
+  monochrome or `"DK-2251"` for black/red. The status packet reports both as
+  generic 62mm continuous DK media, so software cannot auto-detect the color
+  mode. `make print` sends the matching raster mode and checks the model and
+  media size before sending. It deliberately does not poll status
+  after a job: Brother forbids sending status requests while printing, and doing
+  so can itself cause the communication-error blink. Confirm each completed
+  print at the prompt instead.
   Reseat the roll and its leading edge, close the cover firmly, and power-cycle
   the printer if the red light does not clear.
 
