@@ -397,15 +397,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mutagen"
-version = "1.48.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/df/70/1675da133ea92227da41bf5b24e1c66be597ff736a1533ade41da986852f/mutagen-1.48.1.tar.gz", hash = "sha256:8f95637ab9f6f305cec6bd1294e197debe207998e3e068596563c74f86b0a173", size = 1276978, upload-time = "2026-06-25T09:47:32.443Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/47/d8/a29e4e3991765e7ce4ed1f7e4074fe1ba9da03e0048639734de60f9cadb9/mutagen-1.48.1-py3-none-any.whl", hash = "sha256:4f077fe87d3fc7fba259aa63d8c026b18382ca6a42ef37c61e16f1b1b5b82fe7", size = 195706, upload-time = "2026-06-25T09:47:30.296Z" },
-]
-
-[[package]]
 name = "narwhals"
 version = "2.25.0"
 source = { registry = "https://pypi.org/simple" }
@@ -860,18 +851,6 @@ wheels = [
 ]
 
 [[package]]
-name = "slskd-api"
-version = "0.2.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/3d/94/309698fb9cbf9fd269a49192cc72f4f2cf161669e538970099a46525d95d/slskd_api-0.2.4.tar.gz", hash = "sha256:ee3392046bb99f82f4e462f0420b4f11dc13d9a8b5869641bb787d21a2ddd3d1", size = 25590, upload-time = "2026-04-10T07:49:53.666Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/64/4f752fa5aab3da537517fe0942abfa10449d3243bdb1683d88446a7c4872/slskd_api-0.2.4-py3-none-any.whl", hash = "sha256:1288c91bad6f094bccc396352223f393dbdfd95463ec4de1c70209d9db72daae", size = 37179, upload-time = "2026-04-10T07:49:52.732Z" },
-]
-
-[[package]]
 name = "soundfile"
 version = "0.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1017,10 +996,6 @@ printer = [
     { name = "brother-ql-inventree" },
     { name = "pyusb" },
 ]
-soulseek = [
-    { name = "mutagen" },
-    { name = "slskd-api" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -1034,16 +1009,14 @@ requires-dist = [
     { name = "essentia", marker = "extra == 'audio'", specifier = "==2.1b6.dev1389" },
     { name = "imageio-ffmpeg", marker = "extra == 'audio'", specifier = "==0.6.0" },
     { name = "librosa", marker = "extra == 'audio'", specifier = "==0.11.0" },
-    { name = "mutagen", marker = "extra == 'soulseek'", specifier = "==1.48.1" },
     { name = "pillow", specifier = "==12.3.0" },
     { name = "python-dotenv", specifier = "==1.2.2" },
     { name = "python3-discogs-client", specifier = "==2.8" },
     { name = "pyusb", marker = "extra == 'printer'", specifier = "==1.3.1" },
     { name = "requests", specifier = "==2.34.2" },
-    { name = "slskd-api", marker = "extra == 'soulseek'", specifier = "==0.2.4" },
     { name = "yt-dlp", marker = "extra == 'audio'", specifier = "==2026.8.19" },
 ]
-provides-extras = ["audio", "printer", "soulseek"]
+provides-extras = ["audio", "printer"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.12,<1" }]

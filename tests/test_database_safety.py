@@ -105,14 +105,6 @@ class DatabaseSafetyTests(unittest.TestCase):
                     "INSERT INTO key_sources (track_id, source, key) VALUES (99, 'old', 'Am')"
                 )
                 conn.execute(
-                    "INSERT INTO pending_downloads (track_id, username, filename)"
-                    " VALUES (99, 'user', 'file')"
-                )
-                conn.execute(
-                    "INSERT INTO failed_downloads (track_id, reason, failed_at)"
-                    " VALUES (99, 'old', '2020-01-01')"
-                )
-                conn.execute(
                     "INSERT INTO workflow_steps (release_id, step) VALUES (99, 'old')"
                 )
                 conn.commit()
@@ -123,8 +115,6 @@ class DatabaseSafetyTests(unittest.TestCase):
                 for table in (
                     "bpm_sources",
                     "key_sources",
-                    "pending_downloads",
-                    "failed_downloads",
                     "workflow_steps",
                 ):
                     self.assertEqual(
@@ -133,6 +123,92 @@ class DatabaseSafetyTests(unittest.TestCase):
                     )
                 self.assertEqual(migrated.execute("PRAGMA foreign_key_check").fetchall(), [])
                 migrated.close()
+
+    def test_retired_library_migration_preserves_labels_and_is_atomic(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "collection.db"
+                with patch.object(db, "DB_PATH", path):
+                    db.init_db()
+                    conn = db.get_connection()
+                    conn.executescript(
+                        """
+                        PRAGMA user_version = 6;
+                        DELETE FROM schema_migrations WHERE version = 7;
+                        ALTER TABLE tracks ADD COLUMN audio_path TEXT;
+                        ALTER TABLE tracks ADD COLUMN audio_format TEXT;
+                        ALTER TABLE tracks ADD COLUMN audio_source TEXT;
+                        CREATE TABLE pending_downloads (
+                            track_id INTEGER PRIMARY KEY REFERENCES tracks(id),
+                            username TEXT, filename TEXT
+                        );
+                        CREATE TABLE failed_downloads (
+                            track_id INTEGER PRIMARY KEY REFERENCES tracks(id),
+                            reason TEXT, failed_at TEXT
+                        );
+                        INSERT INTO releases (release_id, title) VALUES (1, 'Record');
+                        INSERT INTO tracks
+                            (id, release_id, position, title, bpm, key, isrc, audio_path)
+                            VALUES (10, 1, 'A1', 'Song', 128, 'Am', 'ISRC', '/old/file');
+                        INSERT INTO bpm_sources VALUES (10, 'manual', 128, 'Kept');
+                        INSERT INTO key_sources VALUES (10, 'manual', 'Am', NULL, 'Kept');
+                        INSERT INTO pending_downloads VALUES (10, 'peer', 'file');
+                        INSERT INTO failed_downloads VALUES (10, 'miss', '2020-01-01');
+                        DROP TRIGGER cascade_track_children;
+                        CREATE TRIGGER cascade_track_children AFTER DELETE ON tracks
+                        BEGIN
+                            DELETE FROM pending_downloads WHERE track_id = OLD.id;
+                            DELETE FROM failed_downloads WHERE track_id = OLD.id;
+                            DELETE FROM bpm_sources WHERE track_id = OLD.id;
+                            DELETE FROM key_sources WHERE track_id = OLD.id;
+                        END;
+                        """
+                    )
+                    # Reproduce both old triggers referring to the retired tables.
+                    sql = conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE name = 'cascade_release_children'"
+                    ).fetchone()[0]
+                    conn.execute("DROP TRIGGER cascade_release_children")
+                    conn.execute(sql.replace(
+                        "BEGIN", "BEGIN DELETE FROM pending_downloads WHERE track_id IN "
+                        "(SELECT id FROM tracks WHERE release_id = OLD.release_id);", 1
+                    ))
+                    conn.commit()
+                    conn.close()
+                    if fail:
+                        with patch.object(db, "_add_integrity_triggers", side_effect=RuntimeError):
+                            with self.assertRaises(RuntimeError):
+                                db.init_db()
+                    else:
+                        db.init_db()
+                        db.init_db()  # Repeated initialization is safe and creates no extra backup.
+                    conn = db.get_connection()
+                    row = conn.execute(
+                        "SELECT id, title, bpm, key, isrc FROM tracks"
+                    ).fetchone()
+                    self.assertEqual(tuple(row), (10, 'Song', 128, 'Am', 'ISRC'))
+                    columns = {row[1] for row in conn.execute("PRAGMA table_info(tracks)")}
+                    tables = {row[0] for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )}
+                    self.assertEqual("audio_path" in columns, fail)
+                    self.assertEqual("pending_downloads" in tables, fail)
+                    self.assertEqual("failed_downloads" in tables, fail)
+                    self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0],
+                                     6 if fail else db.SCHEMA_VERSION)
+                    if not fail:
+                        self.assertFalse({"audio_format", "audio_source"} & columns)
+                        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                        conn.execute("DELETE FROM releases WHERE release_id = 1")
+                        for table in ("tracks", "bpm_sources", "key_sources"):
+                            self.assertIsNone(conn.execute(f"SELECT 1 FROM {table}").fetchone())
+                    conn.close()
+                    backups = list((Path(directory) / "backups").glob("*.db"))
+                    self.assertEqual(len(backups), 1)
+                    copied = sqlite3.connect(backups[0])
+                    self.assertEqual(copied.execute("SELECT audio_path FROM tracks").fetchone()[0],
+                                     "/old/file")
+                    copied.close()
 
     def test_bpm_guards_allow_null_and_reject_impossible_values(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -18,8 +18,6 @@ COMMANDS = {
     "import": "vinyl_labels.commands.bpm_manual",
     "render": "vinyl_labels.commands.render_labels",
     "print": "vinyl_labels.commands.print_labels",
-    "download": "vinyl_labels.commands.download_music",
-    "slskd-status": "vinyl_labels.commands.slskd_monitor",
 }
 
 

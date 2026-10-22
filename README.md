@@ -82,7 +82,9 @@ make beatport    # new tracks only
 make bandcamp    # new records only
 make spotify     # new records only (optional)
 make analyze     # missing BPMs or keys on new records only
+make edit        # Review and validate BPM/key
 make render      # create/update labels with 100% validated BPMs
+make print       # Print pending labels
 ```
 
 `make todo` runs the complete automatic chain sequentially, including the slow
@@ -191,7 +193,7 @@ Notes:
 - Step 1 can be repeated when you buy new records: it skips records already
   saved, adds only the delta without duplicating, and removes from the database
   records no longer in your collection. `make fetch full=1` refreshes all saved
-  Discogs metadata while preserving BPM, key, ISRC, and downloaded-audio data
+  Discogs metadata while preserving BPM, key, and ISRC
   only when the refreshed title/artist still identifies the same track. Each
   full refresh—and any run that removes records—first creates a consistent
   timestamped database backup under `backups/`.
@@ -227,89 +229,6 @@ Notes:
   printer fault. At the end, enter how many completed in order; only those are
   moved into `labels_output/printed/`. DK-2251 two-color printing is slower
   than DK-22205 monochrome printing, so a large two-color batch can take longer.
-
-## Download digital copies (Soulseek) — optional
-
-Once your collection is in the database, you can download a **digital copy of
-each record** to play out — sourced from **Soulseek** (a peer-to-peer music
-network), preferring lossless. Files land, tagged and with cover art, in a tidy
-per-record library:
-
-```
-~/Music/Vinyl/<Artist> - <Album> (<CATNO>)/<position> <Title>.<ext>
-```
-
-Format preference is **AIFF → FLAC → WAV → MP3 320**, kept as found (no
-conversion; rekordbox/Serato read all four). This is a personal copy of records
-you already own on vinyl.
-
-The downloading itself is done by **slskd**, a small Soulseek program you run in
-the background; this project just drives it.
-
-**One-time setup (Docker — recommended):**
-
-slskd's config file, `slskd.yml`, lives **inside the container**, so you must
-mount a folder from your Mac over it — otherwise the file is invisible and
-lost when the container is removed. We keep it at `~/slskd/slskd.yml`.
-
-1. **Create the folders and config** — `mkdir -p ~/slskd ~/Music/Vinyl/_incoming`,
-   then put a `slskd.yml` in `~/slskd/` with: your Soulseek `username`/`password`
-   (any you like — Soulseek registers it automatically on first login, no signup
-   needed), `directories.downloads: /app/downloads`, `shares.directories: [/music]`,
-   and an API key under `web.authentication.api_keys`.
-2. **Run the container** (the `-v` flags map container paths to your Mac):
-
-   ```
-   docker run -d --name slskd --restart unless-stopped \
-     -p 5030:5030 -p 50300:50300 \
-     -v ~/slskd:/app \
-     -v ~/Music/Vinyl/_incoming:/app/downloads \
-     -v ~/Music/Vinyl:/music:ro \
-     slskd/slskd:latest
-   ```
-
-   `--restart unless-stopped` means Docker Desktop starts it for you from now
-   on — no daemon to babysit. Web UI: http://localhost:5030 (user/pass from
-   `slskd.yml`, default `slskd`/`slskd`).
-3. **Fill in your `.env`:** `SLSKD_API_KEY` = the key from `slskd.yml`.
-4. After any edit to `~/slskd/slskd.yml`: `docker restart slskd`.
-
-(Alternative without Docker: download the `osx-arm64` binary from
-https://github.com/slskd/slskd/releases onto your `PATH`; run `slskd` once and
-it prints where it created `slskd.yml` — usually `~/.local/share/slskd/`.
-Configure the same things, using real Mac paths instead of `/app/...`.)
-
-**Each time:**
-
-```
-make download    # downloads everything still missing
-```
-
-(With Docker, slskd is already running in the background. `make slskd` checks
-it's up / starts it. Binary users: run `make slskd` in its own terminal first.)
-
-Or use `python -m vinyl_labels download`. Handy variants:
-
-- `make download d=aphex` — only records matching "aphex" (good for a first test).
-- `make download force=1` — re-download even records already present.
-- `make download j=12` — search 12 records at a time (default is 8).
-
-For each record it searches **track by track**, using each track's artist and
-title and preferring the best available format/source. Searching runs several records **in
-parallel**, and the downloads themselves are slskd's job: the script checks in
-on them every few seconds and files each finished track into the library.
-Sitting in someone's upload queue is normal on Soulseek — sometimes for a long
-while — so queued or half-done transfers are **never cancelled**; only when a
-source actually fails (rejects, errors out, disappears) is the track retried
-from the next person sharing it. You can stop with **Ctrl+C** anytime —
-finished tracks are already saved, whatever is still queued keeps downloading
-inside slskd, and the next run collects it before searching for anything else.
-Records already fully downloaded are skipped without touching the network.
-
-At the end it lists any tracks it couldn't find, so you can grab those by hand
-on Soulseek or buy them (Bandcamp is ideal for small-label electronic). Dropping
-a purchased lossless file into the record's folder is a fine way to upgrade a
-rip later.
 
 ## Project structure
 

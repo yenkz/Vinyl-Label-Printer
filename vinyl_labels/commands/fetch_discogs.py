@@ -15,7 +15,7 @@ How to run it:
 You can run it as many times as you like: already-saved records are skipped,
 new ones are added, and records you've removed from your collection are
 deleted. Use --all when you deliberately want to refresh saved Discogs data;
-your BPM, key, ISRC, and downloaded-audio data are preserved.
+your BPM, key, and ISRC are preserved.
 
 Note: Discogs limits requests to 60 per minute, so detailed imports take
 roughly 1 second per new record (or per record with --all).
@@ -68,8 +68,6 @@ def delete_track(cursor, track_id):
     for table in (
         "bpm_sources",
         "key_sources",
-        "pending_downloads",
-        "failed_downloads",
         "track_workflow_steps",
     ):
         cursor.execute(f"DELETE FROM {table} WHERE track_id = ?", (track_id,))
@@ -247,7 +245,7 @@ def main(arguments=None):
                         print("   cover downloaded from Discogs")
 
             # Keep stable track IDs when Discogs still describes the same
-            # recording. This preserves BPM/key/source/download relations
+            # recording. This preserves BPM/key/source relations
             # without detaching and recreating all dependent rows.
             cursor.execute(
                 "SELECT * FROM tracks WHERE release_id = ?",
@@ -275,7 +273,7 @@ def main(arguments=None):
                     continue
 
                 # A different song now occupies this position. Never inherit
-                # the old song's BPM, key, ISRC, or downloaded audio link.
+                # the old song's BPM, key, or ISRC.
                 if previous is not None:
                     delete_track(cursor, previous["id"])
                 cursor.execute(
@@ -349,16 +347,6 @@ def main(arguments=None):
         )
         cursor.execute(
             f"DELETE FROM key_sources WHERE track_id IN"
-            f" (SELECT id FROM tracks WHERE release_id NOT IN ({placeholders}))",
-            collection_ids,
-        )
-        cursor.execute(
-            f"DELETE FROM pending_downloads WHERE track_id IN"
-            f" (SELECT id FROM tracks WHERE release_id NOT IN ({placeholders}))",
-            collection_ids,
-        )
-        cursor.execute(
-            f"DELETE FROM failed_downloads WHERE track_id IN"
             f" (SELECT id FROM tracks WHERE release_id NOT IN ({placeholders}))",
             collection_ids,
         )

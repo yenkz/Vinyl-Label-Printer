@@ -14,12 +14,6 @@ Think of it as a mini spreadsheet with several "tabs":
                  which the editor shows so you can validate intelligently.
   - key_sources: the same provenance history for musical-key estimates
                  (Beatport, Essentia, librosa, or a manual choice).
-  - pending_downloads: downloads that download_music.py queued with slskd
-                 and hasn't collected yet — slskd keeps downloading after
-                 the script exits, so the next run picks these back up.
-  - failed_downloads: tracks download_music.py couldn't find on Soulseek,
-                 with a timestamp, so repeat runs skip them for a week
-                 instead of re-searching the whole network for nothing.
   - workflow_steps: which automatic steps have already been attempted for
                  each record. This makes normal runs delta-only: records that
                  were already in the collection are not searched again.
@@ -35,7 +29,7 @@ from .paths import PROJECT_ROOT
 
 DB_PATH = PROJECT_ROOT / "vinyl_labels.db"
 BUSY_TIMEOUT_MS = 5_000
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Steps that operate on a record after it has been imported. When the workflow
 # ledger is introduced to an existing database, all existing records are
@@ -118,8 +112,6 @@ def _remove_orphans(conn):
     for table in (
         "bpm_sources",
         "key_sources",
-        "pending_downloads",
-        "failed_downloads",
         "track_workflow_steps",
     ):
         conn.execute(
@@ -202,8 +194,6 @@ def _add_cascade_triggers(conn):
         BEGIN
             DELETE FROM bpm_sources WHERE track_id = OLD.id;
             DELETE FROM key_sources WHERE track_id = OLD.id;
-            DELETE FROM pending_downloads WHERE track_id = OLD.id;
-            DELETE FROM failed_downloads WHERE track_id = OLD.id;
             DELETE FROM track_workflow_steps WHERE track_id = OLD.id;
         END
         """,
@@ -215,12 +205,6 @@ def _add_cascade_triggers(conn):
                 SELECT id FROM tracks WHERE release_id = OLD.release_id
             );
             DELETE FROM key_sources WHERE track_id IN (
-                SELECT id FROM tracks WHERE release_id = OLD.release_id
-            );
-            DELETE FROM pending_downloads WHERE track_id IN (
-                SELECT id FROM tracks WHERE release_id = OLD.release_id
-            );
-            DELETE FROM failed_downloads WHERE track_id IN (
                 SELECT id FROM tracks WHERE release_id = OLD.release_id
             );
             DELETE FROM track_workflow_steps WHERE track_id IN (
@@ -290,9 +274,6 @@ def _migrate_database(conn):
             key_verified      INTEGER DEFAULT 0,
             key_strength      REAL,     -- primary detector's uncalibrated score
             isrc              TEXT,     -- ISRC code for track (from Spotify or Beatport); not printed
-            audio_path        TEXT,     -- local path to digital copy downloaded from Soulseek; NULL = not downloaded
-            audio_format      TEXT,     -- "aiff", "flac", "wav", "mp3"
-            audio_source      TEXT,     -- Soulseek user the file came from (provenance)
             sort_order        INTEGER,  -- stable zero-based order within the release
             FOREIGN KEY (release_id) REFERENCES releases(release_id) ON DELETE CASCADE
         );
@@ -313,20 +294,6 @@ def _migrate_database(conn):
             strength  REAL,             -- detector-specific, not comparable across detectors
             detail    TEXT,             -- exact audio/search result used for the estimate
             PRIMARY KEY (track_id, source),
-            FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS pending_downloads (
-            track_id  INTEGER PRIMARY KEY,  -- one live transfer per track
-            username  TEXT NOT NULL,        -- Soulseek user the file was requested from
-            filename  TEXT NOT NULL,        -- remote path on their side
-            FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS failed_downloads (
-            track_id   INTEGER PRIMARY KEY,  -- track we couldn't find on Soulseek
-            reason     TEXT,                 -- why (nothing found, every source failed...)
-            failed_at  TEXT NOT NULL,        -- ISO timestamp; entries expire after a week
             FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
         );
 
@@ -387,13 +354,6 @@ def _migrate_database(conn):
         )
     if "key_strength" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN key_strength REAL")
-    # Digital copy downloaded from Soulseek (download_music.py):
-    if "audio_path" not in columns:
-        conn.execute("ALTER TABLE tracks ADD COLUMN audio_path TEXT")     # local file, NULL = not downloaded
-    if "audio_format" not in columns:
-        conn.execute("ALTER TABLE tracks ADD COLUMN audio_format TEXT")   # "aiff", "flac", "wav", "mp3"
-    if "audio_source" not in columns:
-        conn.execute("ALTER TABLE tracks ADD COLUMN audio_source TEXT")   # Soulseek user it came from
     if "sort_order" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN sort_order INTEGER")
     # Preserve existing track IDs while assigning deterministic display order.
@@ -446,6 +406,16 @@ def _migrate_database(conn):
     # Retire bookkeeping for the removed automatic fallback step. Saved BPM
     # values and their source history deliberately remain untouched.
     conn.execute("DELETE FROM workflow_steps WHERE step = 'bpm'")
+    # Retire the former digital-library schema. Refresh triggers first so they
+    # cannot refer to removed tables. Existing label and analysis data stay intact.
+    if previous_version < 7:
+        conn.execute("DROP TRIGGER IF EXISTS cascade_track_children")
+        conn.execute("DROP TRIGGER IF EXISTS cascade_release_children")
+        conn.execute("DROP TABLE IF EXISTS pending_downloads")
+        conn.execute("DROP TABLE IF EXISTS failed_downloads")
+        for column in ("audio_path", "audio_format", "audio_source"):
+            if column in columns:
+                conn.execute(f"ALTER TABLE tracks DROP COLUMN {column}")
     _remove_orphans(conn)
     _add_safety_indexes(conn)
     _add_integrity_triggers(conn)
@@ -459,6 +429,7 @@ def _migrate_database(conn):
             (4, "stable_track_sort_order"),
             (5, "orphan_cleanup_and_bpm_guards"),
             (6, "per_track_workflow_progress"),
+            (7, "retire_digital_library"),
         ),
     )
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

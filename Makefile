@@ -26,19 +26,6 @@
 #   make beatport full=1
 #   make todo full=1
 #
-# Optional, separate from the labels: download a digital copy of the
-# collection from Soulseek (needs the slskd daemon, see the README).
-#   make slskd      -> make sure the slskd daemon is running (Docker
-#                      container or binary)
-#   make slskd-status -> is slskd logged in to Soulseek right now? (one shot)
-#   make slskd-watch  -> keep watching: notifies you (and restarts slskd to
-#                      reset its reconnect backoff) if it drops off Soulseek
-#   make download   -> download everything still missing into ~/Music/Vinyl
-#                      (make download d=aphex for one record; add force=1
-#                      to re-download; retry=1 to re-try tracks that recently
-#                      came up empty; deep=1 for a wider, slower search;
-#                      j=12 to search 12 records at a time, default 8)
-#
 # Steps with filter accept d=text (d for record):
 #   make render d=aphex   -> only records containing "aphex"
 #   make view d=aphex     -> same + opens them in Preview
@@ -54,19 +41,11 @@ UV := $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
 
 PYTHON := .venv/bin/python
 
-.PHONY: help setup fetch beatport bandcamp spotify analyze audit edit export import render view test print-test check backup print todo slskd slskd-status slskd-watch download
+.PHONY: help setup fetch beatport bandcamp spotify analyze audit edit export import render view test print-test check backup print todo
 
 # These targets represent ordered workflows and must remain serial even when a
 # caller invokes make with -j.
 .NOTPARALLEL: todo test print-test print
-
-# slskd (the Soulseek daemon) is usually installed to ~/.local/bin or via a
-# downloaded binary; we look for it on PATH first.
-SLSKD := $(shell command -v slskd 2>/dev/null)
-
-# docker sometimes isn't in make's PATH (same story as uv above), so fall
-# back to its usual location on Mac.
-DOCKER := $(shell command -v docker 2>/dev/null || echo /usr/local/bin/docker)
 
 help:
 	@awk '/^#/ { sub(/^# ?/, ""); print; next } { exit }' Makefile
@@ -129,41 +108,3 @@ print: render
 # Run the actual pipeline through the serial, fail-fast command orchestrator.
 todo:
 	$(PYTHON) -m vinyl_labels workflow $(if $(full),--all,) $(if $(n),--limit $(n),) $(if $(pace),--pace $(pace),)
-
-# Start the Soulseek daemon. With Docker (recommended, container named
-# "slskd") this just makes sure it's running — it stays up in the
-# background. With the binary, keep this open in its own terminal while
-# you run "make download" in another. (Setup: see the README section
-# "Download digital copies (Soulseek)".)
-slskd:
-	@if [ -n "$(SLSKD)" ]; then \
-		"$(SLSKD)"; \
-	elif ! [ -x "$(DOCKER)" ]; then \
-		echo "slskd not found (no binary, no Docker). See the README."; exit 1; \
-	elif ! "$(DOCKER)" info >/dev/null 2>&1; then \
-		echo "Docker itself isn't running. Open Docker Desktop, wait for it to start, then retry."; exit 1; \
-	elif "$(DOCKER)" inspect slskd >/dev/null 2>&1; then \
-		"$(DOCKER)" start slskd >/dev/null && \
-		echo "slskd is running in Docker — web UI: http://localhost:5030 (logs: docker logs -f slskd)"; \
-	else \
-		echo "No 'slskd' Docker container yet. See the README section about Soulseek."; exit 1; \
-	fi
-
-# Is slskd actually logged in to Soulseek? (Docker's own health check only
-# proves the web UI is up — it stays green while slskd is stuck offline.)
-#   make slskd-status  -> print the state once and exit
-#   make slskd-watch   -> watch continuously; notify + restart if it gets stuck
-slskd-status:
-	$(PYTHON) -m vinyl_labels slskd-status
-
-slskd-watch:
-	$(PYTHON) -m vinyl_labels slskd-status --watch
-
-# make download          -> everything still missing
-# make download d=aphex  -> only records matching "aphex"
-# make download force=1  -> re-download even what's already there
-# make download retry=1  -> also re-try tracks that recently came up empty
-# make download deep=1   -> also try a title-only search (wider, slower)
-# make download j=12     -> search 12 records at a time (default 8)
-download:
-	$(PYTHON) -m vinyl_labels download $(d) $(if $(force),--force,) $(if $(retry),--retry-failed,) $(if $(deep),--deep,) $(if $(j),--parallel $(j),)
