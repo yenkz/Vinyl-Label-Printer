@@ -99,6 +99,7 @@
   button.source b { font-weight: 600; }
   button.source.active { color: var(--ink); border-color: var(--muted); }
   button.source:hover { color: var(--accent); border-color: var(--accent); }
+  button.source.unknown, .verified.unknown { white-space: normal; display: block; }
   td.rev { width: 120px; padding-right: 14px; white-space: nowrap; }
   button.alt, button.confirm {
     font: inherit; font-size: 12px; cursor: pointer; border-radius: 7px;
@@ -147,7 +148,7 @@ function render() {
   const list = document.getElementById('list');
   list.textContent = '';
   let pending = 0, keyPending = 0, bpmDoubtful = 0, keyDoubtful = 0;
-  let unvalidated = 0, validated = 0, total = 0, visible = 0;
+  let unvalidated = 0, validated = 0, unknownApproved = 0, total = 0, visible = 0;
 
   for (const release of data.releases) {
     const inRelease = (release.artist + ' ' + release.title).toLowerCase().includes(query);
@@ -157,9 +158,10 @@ function render() {
       (!onlyMissing || t.bpm === null) &&
       (!onlyMissingKey || t.key === null) &&
       (!onlyDoubtful || t.review || t.key_review) &&
-      (!onlyUnvalidated || (t.bpm !== null && !t.verified)));
+      (!onlyUnvalidated || (t.bpm === null ? !t.unknown_approved : !t.verified)));
     total += release.tracks.length;
-    pending += release.tracks.filter(t => t.bpm === null).length;
+    pending += release.tracks.filter(t => t.bpm === null && !t.unknown_approved).length;
+    unknownApproved += release.tracks.filter(t => t.bpm === null && t.unknown_approved).length;
     keyPending += release.tracks.filter(t => t.key === null).length;
     bpmDoubtful += release.tracks.filter(t => t.review).length;
     keyDoubtful += release.tracks.filter(t => t.key_review).length;
@@ -209,7 +211,7 @@ function render() {
       const tdBpm = cell('bpm', '');
       const inp = document.createElement('input');
       inp.className = 'bpm' + (t.bpm === null ? ' empty' : '') + (t.review ? ' doubtful' : '');
-      inp.placeholder = '?';
+      inp.placeholder = t.unknown_approved ? '–' : '?';
       inp.inputMode = 'decimal';
       inp.value = t.bpm === null ? '' : t.bpm;
       inp.dataset.id = t.id;
@@ -275,7 +277,22 @@ function render() {
         tdSrc.appendChild(b);
       }
       const tdRev = cell('rev', '');
-      if (t.review) {
+      if (t.bpm === null) {
+        if (t.unknown_approved) {
+          const status = document.createElement('span');
+          status.className = 'verified unknown';
+          status.textContent = 'BPM unknown · printing allowed ';
+          tdRev.appendChild(status);
+        }
+        const unknown = document.createElement('button');
+        unknown.className = 'source unknown';
+        unknown.textContent = t.unknown_approved ? 'Undo' : 'BPM unknown — allow printing';
+        unknown.title = t.unknown_approved
+          ? 'Require BPM review again'
+          : 'Keep BPM empty and print a dash for this track';
+        unknown.addEventListener('click', () => approveUnknown(t.id, !t.unknown_approved));
+        tdRev.appendChild(unknown);
+      } else if (t.review) {
         // The other detector measured something different: one click and
         // that value is used.
         if (t.alt !== null) {
@@ -323,6 +340,7 @@ function render() {
       total + '/' + total + ' BPM validated · keys analyzed ✓</span>';
   } else {
     const parts = [validated + '/' + total + ' validated'];
+    if (unknownApproved) parts.push(unknownApproved + ' unknown BPM approved for printing');
     if (pending) parts.push(pending + ' without BPM');
     if (keyPending) parts.push(keyPending + ' without key');
     if (bpmDoubtful) parts.push(bpmDoubtful + ' doubtful BPM');
@@ -330,6 +348,18 @@ function render() {
     if (unvalidated - bpmDoubtful > 0) parts.push((unvalidated - bpmDoubtful) + ' unvalidated');
     summary.textContent = parts.join(' · ');
   }
+}
+
+async function approveUnknown(id, approved) {
+  const r = await fetch('/api/bpm-unknown', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, approved }),
+  });
+  if (!r.ok) {
+    alert('Could not update unknown BPM approval. Reloading the latest values.');
+  }
+  await load();
 }
 
 async function saveValue(id, bpm) {
@@ -343,6 +373,7 @@ async function saveValue(id, bpm) {
     for (const t of release.tracks)
       if (t.id == id) {
         t.bpm = bpm; t.source = bpm === null ? null : 'manual';
+        t.unknown_approved = 0;
         t.review = 0; t.alt = null; t.verified = bpm === null ? 0 : 1;
         t.sources = (t.sources || []).filter(f => f.source !== 'manual');
         if (bpm !== null) t.sources.push({ source: 'manual', bpm: bpm, detail: null });
@@ -362,6 +393,7 @@ async function useSource(id, source) {
     for (const t of release.tracks)
       if (t.id == id) {
         t.bpm = res.bpm; t.source = source;
+        t.unknown_approved = 0;
         t.review = 0; t.alt = null; t.verified = 1;
       }
   render();

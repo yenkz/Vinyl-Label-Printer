@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from vinyl_labels import db
-from vinyl_labels.commands import bpm_manual, edit_bpm
+from vinyl_labels.commands import bpm_manual, edit_bpm, print_labels, render_labels
 
 
 class EditorApiTests(unittest.TestCase):
@@ -91,6 +91,62 @@ class EditorApiTests(unittest.TestCase):
             (track["key_alt"], track["key_needs_review"], track["key_verified"]),
             (None, 0, 1),
         )
+
+    def test_unknown_approval_allows_render_and_print_without_fabricating_bpm(self):
+        edit_bpm.confirm_bpm(10)
+        output = Path(self.directory.name) / "labels"
+        label = output / "Artist - Album (1).png"
+        with patch.object(render_labels, "OUTPUT_DIR", output):
+            render_labels.main([])
+            self.assertFalse(label.exists())
+            handler = self.request("/api/bpm-unknown", {"id": 20, "approved": True})
+            handler.send_error.assert_not_called()
+            track = self.fetch_track(20)
+            self.assertIsNone(track["bpm"])
+            self.assertEqual(track["bpm_verified"], 0)
+            self.assertEqual(track["bpm_unknown_approved"], 1)
+            self.assertEqual(edit_bpm.read_data()["releases"][0]["tracks"][1]["unknown_approved"], 1)
+            render_labels.main([])
+            self.assertTrue(label.exists())
+            self.assertEqual(print_labels.validated_images([label]), ([label], []))
+
+            self.request("/api/bpm-unknown", {"id": 20, "approved": False})
+            self.assertEqual(print_labels.validated_images([label]), ([], [label]))
+            render_labels.main([])
+            self.assertFalse(label.exists())
+            self.assertTrue(list((output / "obsolete").glob("*.png")))
+
+    def test_unknown_approval_cannot_override_numeric_bpm_or_accept_invalid_input(self):
+        for payload, status in (
+            ({"id": 10, "approved": True}, 409),
+            ({"id": 999, "approved": True}, 409),
+            ({"id": 20, "approved": "false"}, 400),
+            ({"id": 20}, 400),
+        ):
+            with self.subTest(payload=payload):
+                handler = self.request("/api/bpm-unknown", payload)
+                handler.send_error.assert_called_once_with(status)
+                handler.respond.assert_not_called()
+        self.assertEqual(self.fetch_track()["bpm"], 120)
+
+    def test_manual_value_and_clearing_it_reset_unknown_approval(self):
+        for bpm in (128, None):
+            with self.subTest(bpm=bpm):
+                edit_bpm.save_bpm(20, None)
+                edit_bpm.approve_unknown_bpm(20, True)
+                self.request("/api/bpm", {"id": 20, "bpm": bpm})
+                self.assertEqual(self.fetch_track(20)["bpm_unknown_approved"], 0)
+
+    def test_new_unverified_numeric_bpm_is_not_authorized_by_old_unknown_approval(self):
+        edit_bpm.confirm_bpm(10)
+        edit_bpm.approve_unknown_bpm(20, True)
+        conn = db.get_connection()
+        conn.execute("UPDATE tracks SET bpm = 125, bpm_verified = 0 WHERE id = 20")
+        conn.commit()
+        conn.close()
+        label = Path("Artist - Album (1).png")
+        self.assertEqual(print_labels.validated_images([label]), ([], [label]))
+        self.assertEqual(edit_bpm.read_data()["releases"][0]["tracks"][1]["unknown_approved"], 0)
 
     def test_confirm_endpoints_clear_alternatives_and_preserve_sources(self):
         bpm_handler = self.request("/api/confirm", {"id": 10})

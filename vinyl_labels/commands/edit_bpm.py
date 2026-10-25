@@ -81,7 +81,7 @@ def read_data():
     for release in cursor.fetchall():
         cursor.execute(
             "SELECT id, position, title, artist, duration_display, bpm, bpm_source,"
-            "       bpm_alt, bpm_needs_review, bpm_verified, key, key_source,"
+            "       bpm_alt, bpm_needs_review, bpm_verified, bpm_unknown_approved, key, key_source,"
             "       key_alt, key_needs_review, key_verified, key_strength"
             " FROM tracks WHERE release_id = ? ORDER BY sort_order, id",
             (release["release_id"],),
@@ -99,6 +99,7 @@ def read_data():
                 "alt": t["bpm_alt"],
                 "review": t["bpm_needs_review"] or 0,
                 "verified": t["bpm_verified"] or 0,
+                "unknown_approved": t["bpm_unknown_approved"] if t["bpm"] is None else 0,
                 "key": t["key"],
                 "camelot": to_camelot(t["key"]),
                 "key_source": t["key_source"],
@@ -137,7 +138,8 @@ def save_bpm(track_id, bpm):
     conn = get_connection()
     cursor = conn.execute(
         "UPDATE tracks SET bpm = ?, bpm_source = ?,"
-        " bpm_alt = NULL, bpm_needs_review = 0, bpm_verified = ? WHERE id = ?",
+        " bpm_alt = NULL, bpm_needs_review = 0, bpm_verified = ?,"
+        " bpm_unknown_approved = 0 WHERE id = ?",
         (bpm, "manual" if bpm is not None else None, int(bpm is not None), track_id),
     )
     if cursor.rowcount != 1:
@@ -170,7 +172,7 @@ def use_source(track_id, source):
         return None
     cursor = conn.execute(
         "UPDATE tracks SET bpm = ?, bpm_source = ?, bpm_alt = NULL,"
-        " bpm_needs_review = 0, bpm_verified = 1 WHERE id = ?",
+        " bpm_needs_review = 0, bpm_verified = 1, bpm_unknown_approved = 0 WHERE id = ?",
         (row["bpm"], source, track_id),
     )
     if cursor.rowcount != 1:
@@ -246,6 +248,20 @@ def confirm_key(track_id):
     return confirmed
 
 
+def approve_unknown_bpm(track_id, approved):
+    """Allow an explicitly reviewed empty BPM without inventing a value."""
+    conn = get_connection()
+    cursor = conn.execute(
+        "UPDATE tracks SET bpm_unknown_approved = ?, bpm_verified = 0,"
+        " bpm_needs_review = 0, bpm_alt = NULL WHERE id = ? AND bpm IS NULL",
+        (int(approved), track_id),
+    )
+    updated = cursor.rowcount == 1
+    conn.commit()
+    conn.close()
+    return updated
+
+
 def confirm_bpm(track_id):
     """The user reviewed the track and the saved BPM is fine: it becomes
     validated (the source stays as it was)."""
@@ -296,6 +312,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path not in (
             "/api/bpm",
             "/api/confirm",
+            "/api/bpm-unknown",
             "/api/key",
             "/api/source",
             "/api/key-source",
@@ -309,6 +326,17 @@ class Handler(BaseHTTPRequestHandler):
             track_id = int(request["id"])
         except (TypeError, ValueError, KeyError, json.JSONDecodeError):
             self.send_error(400)
+            return
+
+        if self.path == "/api/bpm-unknown":
+            approved = request.get("approved")
+            if not isinstance(approved, bool):
+                self.send_error(400)
+                return
+            if not approve_unknown_bpm(track_id, approved):
+                self.send_error(409)
+                return
+            self.respond(json.dumps({"ok": True}))
             return
 
         if self.path == "/api/source":

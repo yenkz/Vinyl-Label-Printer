@@ -29,7 +29,7 @@ from .paths import PROJECT_ROOT
 
 DB_PATH = PROJECT_ROOT / "vinyl_labels.db"
 BUSY_TIMEOUT_MS = 5_000
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Steps that operate on a record after it has been imported. When the workflow
 # ledger is introduced to an existing database, all existing records are
@@ -267,6 +267,7 @@ def _migrate_database(conn):
             bpm_alt           REAL,     -- alternative candidate if the detectors disagreed
             bpm_needs_review  INTEGER DEFAULT 0,  -- 1 = review manually in edit_bpm.py
             bpm_verified      INTEGER DEFAULT 0,  -- 1 = validated (detectors agree, audited, or confirmed by you)
+            bpm_unknown_approved INTEGER NOT NULL DEFAULT 0,
             key               TEXT,     -- tonality ("Am", "F#"); displayed on label in Camelot ("8A")
             key_source        TEXT,     -- "beatport", "essentia", "librosa", "manual", or NULL
             key_alt           TEXT,     -- alternative if local key detectors disagreed
@@ -336,6 +337,8 @@ def _migrate_database(conn):
         conn.execute("ALTER TABLE tracks ADD COLUMN bpm_verified INTEGER DEFAULT 0")
         # BPM entered manually were already validated by you when you wrote them.
         conn.execute("UPDATE tracks SET bpm_verified = 1 WHERE bpm_source = 'manual'")
+    if "bpm_unknown_approved" not in columns:
+        conn.execute("ALTER TABLE tracks ADD COLUMN bpm_unknown_approved INTEGER NOT NULL DEFAULT 0")
     if "isrc" not in columns:
         conn.execute("ALTER TABLE tracks ADD COLUMN isrc TEXT")
     if "key" not in columns:
@@ -430,6 +433,7 @@ def _migrate_database(conn):
             (5, "orphan_cleanup_and_bpm_guards"),
             (6, "per_track_workflow_progress"),
             (7, "retire_digital_library"),
+            (8, "explicit_unknown_bpm_approval"),
         ),
     )
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

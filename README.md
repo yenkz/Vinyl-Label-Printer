@@ -83,7 +83,7 @@ make bandcamp    # new records only
 make spotify     # new records only (optional)
 make analyze     # missing BPMs or keys on new records only
 make edit        # Review and validate BPM/key
-make render      # create/update labels with 100% validated BPMs
+make render      # create/update labels after every track's BPM review
 make print       # Print pending labels
 ```
 
@@ -201,8 +201,13 @@ Notes:
 - Step 7 can generate just some records and show them before printing:
   `python -m vinyl_labels render aphex --view`
   generates labels for records containing "aphex" and opens them in Preview to check.
-  A record is rendered only when every track has a BPM and its green ✓ in
-  `make edit`; incomplete records stay pending for the next `make render` run.
+  A record is rendered when every track has a validated BPM or an explicitly
+  approved unknown BPM in `make edit`. If you cannot establish a track's BPM,
+  leave it empty and click **BPM unknown — allow printing**. The label prints
+  a dash for that BPM; no number is invented. **Undo** removes the approval,
+  and entering a BPM replaces it with a validated value. Unreviewed empty BPMs
+  still block printing. If automatic enrichment later finds a BPM, that value
+  must satisfy the normal validation rule.
   Existing images are compared pixel-for-pixel with the current database data:
   unchanged labels are skipped, while changed labels are replaced. If the old
   label is already under `labels_output/printed/`, its changed replacement is
@@ -223,7 +228,7 @@ Notes:
   You can also print just some:
   `python -m vinyl_labels print aphex` prints those containing "aphex" in the filename.
   `make print` refreshes changed renders first, refuses labels that are not 100%
-  BPM-validated, and requires physical confirmation after every print.
+  approved (validated BPM or explicitly accepted unknown), and requires physical confirmation after every print.
   To print every pending label continuously without per-label pauses, run
   `make print batch=1`. It still cuts after each label and stops on a reported
   printer fault. At the end, enter how many completed in order; only those are

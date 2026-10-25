@@ -13,7 +13,7 @@
 #   make audit      -> re-checks measurements from old version
 #                      (one time only; make audit n=5 to test)
 #   make edit       -> step 6: review fallback BPM/key detector results
-#   make render     -> step 7: creates/updates 100%-validated labels
+#   make render     -> step 7: creates/updates labels after every track's BPM review
 #   make print-test -> step 8 in test mode (no printer)
 #   make check      -> run the software test suite
 #   make backup     -> create a consistent database backup now

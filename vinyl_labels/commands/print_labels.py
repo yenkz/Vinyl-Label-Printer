@@ -155,7 +155,8 @@ def validated_images(paths):
             continue
         row = conn.execute(
             "SELECT COUNT(*) AS total,"
-            "       SUM(CASE WHEN bpm IS NOT NULL AND bpm_verified = 1 THEN 1 ELSE 0 END) AS valid"
+            "       SUM(CASE WHEN (bpm IS NOT NULL AND bpm_verified = 1)"
+            " OR (bpm IS NULL AND bpm_unknown_approved = 1) THEN 1 ELSE 0 END) AS valid"
             " FROM tracks WHERE release_id = ?",
             (release_id,),
         ).fetchone()
@@ -341,13 +342,13 @@ def main(arguments=None):
     if blocked:
         print(
             f"Skipping {len(blocked)} unsafe pending label(s): each label must "
-            "have a current release filename, a unique release ID, and 100% "
-            "BPM validation. Run `make render` after any metadata change."
+            "have a current release filename, a unique release ID, and every "
+            "BPM validated or explicitly approved as unknown. Run `make render` after any metadata change."
         )
 
     if not images:
         if blocked:
-            print("No current, uniquely identified, fully validated labels are ready to print.")
+            print("No current, uniquely identified, fully approved labels are ready to print.")
         elif filter_str:
             print(f"No pending labels containing '{filter_str}'.")
         else:

@@ -182,7 +182,8 @@ class PrintableValidationTests(unittest.TestCase):
                 id INTEGER PRIMARY KEY,
                 release_id INTEGER NOT NULL,
                 bpm REAL,
-                bpm_verified INTEGER NOT NULL
+                bpm_verified INTEGER NOT NULL,
+                bpm_unknown_approved INTEGER NOT NULL DEFAULT 0
             );
             INSERT INTO releases (release_id, artist, title)
             VALUES (10, 'Current Artist', 'Current Title'),

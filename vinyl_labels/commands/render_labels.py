@@ -14,9 +14,9 @@ comes out text-only, like before.
 BPM and key are in bold because that's what you'll be reading in the dark
 in the booth.
 
-A label is generated only when every track on the record has a BPM validated
-in edit_bpm.py. Records with missing or unvalidated BPMs remain pending and
-will be picked up by the next run after you validate them. Every run also
+A label is generated when every track has a validated BPM or an explicitly
+approved unknown BPM in edit_bpm.py. Other missing or unvalidated BPMs remain
+pending until reviewed. Every run also
 compares the current database-backed rendering with the image on disk: changed
 labels are replaced, while identical ones are left untouched.
 
@@ -277,7 +277,7 @@ def render_release(release, tracks, font_title, font_text, font_bpm, font_meta):
             if track["bpm_needs_review"]:
                 bpm_text += "*"
         else:
-            bpm_text = "?"
+            bpm_text = "–" if track["bpm_unknown_approved"] else "?"
         draw.text((col_bpm_x, y + 8), bpm_text, font=font_bpm, fill="black")
 
         # The key in Camelot ("8A"). No "?" when missing: most non-electronic
@@ -377,7 +377,8 @@ def main(arguments=None):
 
         validated = sum(
             1 for track in tracks
-            if track["bpm"] is not None and track["bpm_verified"]
+            if (track["bpm"] is not None and track["bpm_verified"])
+            or (track["bpm"] is None and track["bpm_unknown_approved"])
         )
         if validated != len(tracks):
             archived = archive_pending_artifacts(OUTPUT_DIR, release["release_id"])
@@ -389,7 +390,7 @@ def main(arguments=None):
             waiting_for_validation += 1
             print(
                 f"Waiting for validation: {release['artist']} - {release['title']} "
-                f"({validated}/{len(tracks)} tracks validated)"
+                f"({validated}/{len(tracks)} tracks approved for printing)"
             )
             # Do not mark the render workflow step: once validation is complete,
             # a normal `make render` must see this release again.
@@ -456,8 +457,8 @@ def main(arguments=None):
     )
     if waiting_for_validation:
         print(
-            f"{waiting_for_validation} records are still waiting for 100% BPM "
-            "validation in `make edit`."
+            f"{waiting_for_validation} records still need BPM review in `make edit`: "
+            "validate known values or explicitly approve unknown BPMs."
         )
 
     if open_preview and generated_paths:
@@ -469,7 +470,7 @@ def main(arguments=None):
         print("Next step: python -m vinyl_labels print --test  (dry run)")
         print("        or: python -m vinyl_labels print         (print)")
     elif waiting_for_validation:
-        print("Next step: make edit  (validate every track, then run make render again)")
+        print("Next step: make edit  (review every track, then run make render again)")
     return 0
 
 
