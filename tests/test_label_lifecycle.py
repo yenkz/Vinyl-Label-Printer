@@ -237,6 +237,72 @@ class PrintableValidationTests(unittest.TestCase):
 
 
 class PrintProtocolTests(unittest.TestCase):
+    def run_print_session(self, responses, outcomes=None, arguments=None):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            pending = [output / f"Artist - Record ({i}).png" for i in range(1, 4)]
+            for path in pending:
+                Image.new("RGB", (696, 150), "white").save(path)
+
+            with (
+                mock.patch.object(print_labels, "OUTPUT_DIR", output),
+                mock.patch.object(print_labels, "PRINTED_DIR", output / "printed"),
+                mock.patch.object(
+                    print_labels, "validated_images", return_value=(pending, [])
+                ),
+                mock.patch.object(print_labels, "find_printer", return_value="usb://printer"),
+                mock.patch.object(print_labels, "show_preflight", return_value=True),
+                mock.patch.object(
+                    print_labels, "send", return_value={"outcome": "sent"}, side_effect=outcomes
+                ) as send,
+                mock.patch.object(print_labels, "move_to_printed") as move,
+                mock.patch.object(print_labels.time, "sleep"),
+                mock.patch("builtins.input", side_effect=responses) as prompt,
+                mock.patch("builtins.print"),
+            ):
+                result = print_labels.main(arguments or [])
+
+            return result, pending, prompt, send, move
+
+    def test_yes_to_all_at_start_or_after_a_label_confirms_remaining_labels(self):
+        for responses in (["a"], ["y", " A "], ["y", "y", "a"]):
+            with self.subTest(responses=responses):
+                result, pending, prompt, send, move = self.run_print_session(responses)
+
+                self.assertEqual(result, 0)
+                self.assertEqual(prompt.call_count, len(responses))
+                self.assertEqual(send.call_count, len(pending))
+                self.assertEqual(move.call_args_list, [mock.call(path) for path in pending])
+
+    def test_yes_to_all_stops_on_failed_send_and_keeps_failed_labels_pending(self):
+        result, pending, prompt, send, move = self.run_print_session(
+            ["a"], outcomes=[{"outcome": "sent"}, {"outcome": "failed"}]
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(prompt.call_count, 1)
+        self.assertEqual(send.call_count, 2)
+        move.assert_called_once_with(pending[0])
+
+    def test_yes_to_all_does_not_carry_over_to_the_next_run(self):
+        self.run_print_session(["a"])
+        result, pending, prompt, send, move = self.run_print_session(["y", "n", "q"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(prompt.call_count, 3)
+        self.assertEqual(send.call_count, 2)
+        move.assert_not_called()
+
+    def test_batch_still_confirms_once_at_the_end(self):
+        result, pending, prompt, send, move = self.run_print_session(
+            ["y", "all"], arguments=["--batch"]
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(prompt.call_count, 2)
+        self.assertEqual(send.call_count, len(pending))
+        self.assertEqual(move.call_args_list, [mock.call(path) for path in pending])
+
     def test_current_roll_uses_monochrome_raster_mode(self):
         with mock.patch.object(print_labels.config, "PRINTER_ROLL", "DK-22205"):
             roll = print_labels.configured_roll()

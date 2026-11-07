@@ -222,13 +222,16 @@ Notes:
   62mm continuous media, 270° portrait rotation, fit to the printable width,
   error-diffusion monochrome conversion, and an automatic cut after each label.
 - Step 8 only prints new labels. After every USB job, it asks you to confirm
-  that the physical label printed and cut completely; only a confirmed label
-  moves to `labels_output/printed/`. To reprint safely after metadata changed,
+  that the physical label printed and cut completely. Enter `a` (**yes to all**)
+  at the initial prompt or after any label to automatically answer `y` for the
+  rest of that run. Confirmed labels move to `labels_output/printed/`.
+  To reprint safely after metadata changed,
   run `python -m vinyl_labels render FILTER --all` to create a current canonical copy.
   You can also print just some:
   `python -m vinyl_labels print aphex` prints those containing "aphex" in the filename.
   `make print` refreshes changed renders first, refuses labels that are not 100%
-  approved (validated BPM or explicitly accepted unknown), and requires physical confirmation after every print.
+  approved (validated BPM or explicitly accepted unknown), and asks for physical
+  confirmation after every print unless you choose `a`.
   To print every pending label continuously without per-label pauses, run
   `make print batch=1`. It still cuts after each label and stops on a reported
   printer fault. At the end, enter how many completed in order; only those are

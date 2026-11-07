@@ -11,9 +11,10 @@ monochrome artwork, and automatic cutting. Both DK-22205 monochrome and
 DK-2251 black/red rolls are supported; ``config.PRINTER_ROLL`` must match the
 installed roll.
 
-After each USB job, you must confirm that the physical label printed and cut
-completely. Only then is it moved to labels_output/printed/, so next time only
-confirmed labels are skipped. If you want to reprint one, move it back to
+After each USB job, confirm that the physical label printed and cut completely,
+or choose 'a' to automatically answer yes for the rest of this run. Confirmed
+labels are moved to labels_output/printed/ and skipped next time.
+If you want to reprint one, move it back to
 labels_output/ and run this again (or force a fresh canonical copy with
 python -m vinyl_labels render FILTER --all).
 
@@ -334,6 +335,7 @@ def main(arguments=None):
     args = parse_arguments(arguments)
     test_mode = args.test
     batch_mode = args.batch
+    yes_to_all = False
     filter_str = (args.filter or "").lower()
 
     pending = sorted(p for p in OUTPUT_DIR.glob("*.png") if filter_str in p.name.lower())
@@ -375,11 +377,17 @@ def main(arguments=None):
                 "There will be no pauses. (y/n): "
             )
         else:
-            prompt = f"Print the {len(images)} labels now? (y/n): "
+            prompt = (
+                f"Print the {len(images)} labels now? "
+                "(y = yes / a = yes to all / n = cancel): "
+            )
         response = input(prompt).strip().lower()
-        if response != "y":
+        if response != "y" and not (response == "a" and not batch_mode):
             print("Cancelled. Nothing printed.")
             return 0
+        yes_to_all = response == "a"
+        if yes_to_all:
+            print("Yes to all: automatically confirming labels for this run.\n")
 
         PRINTED_DIR.mkdir(exist_ok=True)
 
@@ -425,7 +433,7 @@ def main(arguments=None):
             # packets expected by brother_ql's blocking mode. A successful USB
             # write only means the job reached the device; it does not prove
             # that the physical label printed completely. Keep the PNG pending
-            # until the user has inspected and explicitly confirmed it below.
+            # until confirmed below, unless the user opted into yes to all.
             status = send(
                 instructions=instructions,
                 printer_identifier=printer_identifier,
@@ -452,14 +460,19 @@ def main(arguments=None):
                 print("   Sent; continuing with the batch.")
                 continue
 
-            while True:
+            confirmation = "y" if yes_to_all else None
+            while confirmation is None:
                 confirmation = input(
                     "   Did it print and cut completely? "
-                    "(y = confirm / n = keep pending / q = stop): "
+                    "(y = confirm / a = yes to all / n = keep pending / q = stop): "
                 ).strip().lower()
-                if confirmation in {"y", "n", "q"}:
-                    break
-                print("   Please enter y, n, or q.")
+                if confirmation == "a":
+                    yes_to_all = True
+                    confirmation = "y"
+                    print("   Yes to all: automatically confirming labels for this run.")
+                elif confirmation not in {"y", "n", "q"}:
+                    confirmation = None
+                    print("   Please enter y, a, n, or q.")
         except KeyboardInterrupt:
             print(
                 "\nStopped. The current label stayed pending because its "

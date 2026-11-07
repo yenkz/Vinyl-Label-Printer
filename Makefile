@@ -18,6 +18,7 @@
 #   make check      -> run the software test suite
 #   make backup     -> create a consistent database backup now
 #   make print      -> step 8: prints pending labels
+#                      (a = yes to all at a confirmation prompt)
 #   make print batch=1 -> prints every pending label without pausing
 #
 # Every automatic step is incremental by default. To deliberately revisit the
